@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-BkSabwWG.js";import{t}from"./index-Mn6UBYut.js";import{t as n}from"./FollowListScreen-BTi9HBcL.js";var r=e();function i(){let{username:e}=t.useParams();return(0,r.jsx)(n,{username:e,kind:`following`})}export{i as component};
