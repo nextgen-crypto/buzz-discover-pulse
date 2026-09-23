@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { articleQueryOptions, relatedNewsQueryOptions } from "@/frontend/queries/sections";
-import { NewsThreadScreen } from "@/frontend/screens/NewsThreadScreen";
+import { storyQueryOptions } from "@/frontend/hooks/useStoryDetail";
+import { NewsThreadPending, NewsThreadScreen } from "@/frontend/screens/NewsThreadScreen";
 
 export const Route = createFileRoute("/news/$articleId")({
   head: () => ({
@@ -12,9 +12,7 @@ export const Route = createFileRoute("/news/$articleId")({
     ],
   }),
   loader: ({ context, params }) =>
-    Promise.all([
-      context.queryClient.ensureQueryData(articleQueryOptions(params.articleId)),
-      context.queryClient.ensureQueryData(relatedNewsQueryOptions(params.articleId)),
-    ]),
+    context.queryClient.ensureQueryData(storyQueryOptions(params.articleId)).catch(() => null),
+  pendingComponent: NewsThreadPending,
   component: NewsThreadScreen,
 });

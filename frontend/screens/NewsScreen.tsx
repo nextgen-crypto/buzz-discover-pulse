@@ -1,72 +1,105 @@
-import { useMemo, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearch } from "@tanstack/react-router";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import {
-  BadgeCheck,
-  Bell,
-  Bookmark,
-  Flame,
-  Heart,
-  MapPin,
-  MessageCircle,
-  Repeat2,
-  Search,
-  Share2,
-} from "lucide-react";
-import { discussionCount } from "@/backend/api/sections.functions";
+import { MoreHorizontal, Plus, Search } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import { creators, explorePhotos } from "@/backend/database/seed";
 import { imageUrl } from "@/backend/domain/media";
-import type { NewsArticle } from "@/backend/domain/types";
-import { newsQueryOptions, newsTopicsQueryOptions } from "@/frontend/queries/sections";
 import { AppShell } from "@/frontend/components/AppShell";
-import { ShareSheet } from "@/frontend/components/overlays/ShareSheet";
+import { StoryListItem } from "@/frontend/components/news/StoryListItem";
+import { formatCount } from "@/frontend/components/news/newsFormat";
+import { openCreate } from "@/frontend/components/home/nav-items";
+import { newsStoriesQueryOptions } from "@/frontend/hooks/useNewsStories";
+import { trendingTopicsQueryOptions } from "@/frontend/hooks/useTrendingTopics";
 import { useNewsPrefs } from "@/frontend/hooks/useNewsPrefs";
 import { cn } from "@/lib/utils";
 
-const compact = new Intl.NumberFormat("en", { notation: "compact" });
-
-const TABS = ["News", "Following", "For You", "Trending", "Local", "Saved"] as const;
-const CATEGORIES = [
-  "All",
-  "Tanzania",
-  "Africa",
-  "World",
-  "Politics",
-  "Business",
-  "Technology",
-  "Sports",
-  "Entertainment",
-  "Health",
-  "Science",
-  "Education",
-  "Crime",
-  "Lifestyle",
-  "Environment",
-] as const;
-const CITIES = ["Dar es Salaam", "Nairobi", "Lagos", "Lisbon", "London", "Berlin", "San Francisco"];
-const SEARCH_SCOPES = ["Latest", "Relevant", "Most discussed"] as const;
+const TABS = ["Latest", "Following", "Saved"] as const;
 const DISCOVER_FILTERS = ["All", "Travel", "Design", "Food", "Sports"] as const;
 
-function pseudo(id: string, mod: number, base: number): number {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return base + (h % mod);
-}
-
+/** Screen 1 — Today's News: heading, search, flat story list, trending. */
 export function NewsScreen() {
-  const { data: articles } = useSuspenseQuery(newsQueryOptions);
-  const { data: topics = [] } = useQuery(newsTopicsQueryOptions);
+  // Suspense: the route loader provides identical data on server and client,
+  // so first paint can never disagree (hydration-safe).
+  const { data } = useSuspenseQuery(newsStoriesQueryOptions);
+  const stories = data?.stories ?? [];
+  const live = data?.live ?? false;
+  const { data: trends = [] } = useSuspenseQuery(trendingTopicsQueryOptions);
   const prefs = useNewsPrefs();
+  const { q } = useSearch({ from: "/news" });
 
-  const [tab, setTab] = useState<(typeof TABS)[number]>("News");
-  const [category, setCategory] = useState<string>("All");
-  const [query, setQuery] = useState("");
-  const [scope, setScope] = useState<(typeof SEARCH_SCOPES)[number]>("Relevant");
-  const [city, setCity] = useState(CITIES[0]!);
-  const [savedFilter, setSavedFilter] = useState<"All" | "Unread">("All");
+  const [tab, setTab] = useState<(typeof TABS)[number]>("Latest");
+  const [query, setQuery] = useState(q ?? "");
+  const [hiddenTrends, setHiddenTrends] = useState<string[]>([]);
+  const [mutedTrends, setMutedTrends] = useState<string[]>([]);
   const [discover, setDiscover] = useState<(typeof DISCOVER_FILTERS)[number]>("All");
   const [viewing, setViewing] = useState<(typeof explorePhotos)[number] | null>(null);
-  const [sharing, setSharing] = useState<NewsArticle | null>(null);
+  // Browser-only prefs (localStorage) don't exist during SSR — ignore them
+  // on the first render so hydration matches the server HTML exactly.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const feed = useMemo(() => {
+    const needle = (q || query).trim().toLowerCase();
+    let list = [...stories];
+    if (!mounted) {
+      return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    }
+    if (needle) {
+      const words = needle.split(/\s+/);
+      return list
+        .map((s) => {
+          const hay = `${s.headline} ${s.summary} ${s.category}`.toLowerCase();
+          return { s, hits: words.filter((w) => hay.includes(w)).length };
+        })
+        .filter((x) => x.hits > 0)
+        .sort((a, b) => b.hits - a.hits || b.s.postCount - a.s.postCount)
+        .map((x) => x.s);
+    }
+    if (tab === "Following") {
+      const followed = [...prefs.topics, ...prefs.sources, ...loadIds("wizz:news-stories-followed")];
+      list = list.filter(
+        (s) =>
+          followed.includes(s.id) ||
+          followed.includes(s.category.toLowerCase()) ||
+          followed.includes(s.headline.toLowerCase()),
+      );
+    }
+    if (tab === "Saved") {
+      list = list.filter((s) => prefs.saved.includes(s.id) || loadIds("wizz:news-saved").includes(s.id));
+    }
+    return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [stories, tab, query, q, prefs, mounted]);
+
+  const visibleTrends = trends.filter(
+    (t) => !hiddenTrends.includes(t.id) && !mutedTrends.includes(t.id),
+  );
+
+  const needle = (q || query).trim().toLowerCase();
+  const { data: people = [] } = useQuery({
+    queryKey: ["news-search-people", needle],
+    enabled: needle.length >= 2,
+    staleTime: 30_000,
+    retry: false,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id, username, display_name, avatar_url, verified")
+        .or(`username.ilike.%${needle}%,display_name.ilike.%${needle}%`)
+        .limit(6);
+      if (error) throw error;
+      return (data ?? []) as {
+        id: string;
+        username: string;
+        display_name: string;
+        avatar_url: string | null;
+        verified: boolean;
+      }[];
+    },
+  });
+  const matchingTrends = needle.length >= 2 ? visibleTrends : [];
 
   const byId = useMemo(() => new Map(creators.map((c) => [c.id, c])), []);
   const photos = useMemo(
@@ -75,324 +108,202 @@ export function NewsScreen() {
     [discover],
   );
 
-  const feed = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let list = [...articles];
-    if (category !== "All") list = list.filter((a) => a.category === category);
-    if (q) {
-      list = list
-        .map((a) => {
-          const hay =
-            `${a.title} ${a.summary} ${a.sourceName} ${a.reporter} ${a.location} ${a.tags.join(" ")}`.toLowerCase();
-          const hits = q.split(/\s+/).filter((w) => hay.includes(w)).length;
-          return { a, hits };
-        })
-        .filter((x) => x.hits > 0)
-        .sort((x, y) => {
-          if (scope === "Most discussed") return discussionCount(y.a.id) - discussionCount(x.a.id);
-          if (scope === "Latest") return y.a.publishedAt.localeCompare(x.a.publishedAt);
-          return y.hits - x.hits || discussionCount(y.a.id) - discussionCount(x.a.id);
-        })
-        .map((x) => x.a);
-      return list;
-    }
-    if (tab === "Following") {
-      const followed = list.filter(
-        (a) =>
-          prefs.topics.some(
-            (t) => a.tags.map((x) => x.toLowerCase()).includes(t) || a.category.toLowerCase() === t,
-          ) || prefs.sources.includes(a.sourceName.toLowerCase()),
-      );
-      return followed;
-    }
-    if (tab === "Saved") {
-      let saved = list.filter((a) => prefs.saved.includes(a.id));
-      if (savedFilter === "Unread") saved = saved.filter((a) => !prefs.read.includes(a.id));
-      return saved;
-    }
-    if (tab === "Trending") {
-      return [...list].sort((a, b) => discussionCount(b.id) - discussionCount(a.id));
-    }
-    if (tab === "Local") {
-      return list.filter((a) => a.location === city);
-    }
-    if (tab === "For You") {
-      const hot = (a: NewsArticle) =>
-        (prefs.topics.some((t) => a.tags.map((x) => x.toLowerCase()).includes(t)) ? 1000 : 0) +
-        discussionCount(a.id);
-      return [...list].sort((a, b) => hot(b) - hot(a));
-    }
-    return list;
-  }, [articles, tab, category, query, scope, city, savedFilter, prefs]);
-
   return (
     <AppShell title="News">
-      <div className="lg:grid lg:grid-cols-[200px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_300px]">
-        {/* Left rail (desktop): categories + following */}
-        <aside className="hidden border-r border-border p-4 lg:block">
-          <p className="px-2 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            Categories
-          </p>
-          <ul className="mt-2 space-y-0.5">
-            {CATEGORIES.map((c) => (
-              <li key={c}>
-                <button
-                  onClick={() => {
-                    setCategory(c);
-                    setTab("News");
-                  }}
-                  className={cn(
-                    "w-full rounded-xl px-3 py-2 text-left text-sm",
-                    category === c && tab === "News"
-                      ? "bg-secondary font-bold text-foreground"
-                      : "text-muted-foreground hover:bg-secondary",
-                  )}
-                >
-                  {c}
-                </button>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-5 px-2 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            Following
-          </p>
-          {prefs.topics.length === 0 && prefs.sources.length === 0 ? (
-            <p className="mt-2 px-2 text-xs leading-relaxed text-muted-foreground">
-              Follow topics and sources to personalize your news.
-            </p>
-          ) : (
-            <ul className="mt-2 space-y-0.5">
-              {[...prefs.topics.map((t) => `#${t}`), ...prefs.sources.map((s) => `@${s}`)].map(
-                (f) => (
-                  <li key={f} className="truncate rounded-xl px-3 py-1.5 text-sm text-foreground">
-                    {f}
-                  </li>
-                ),
-              )}
-            </ul>
-          )}
-        </aside>
-
-        {/* Center feed */}
-        <div className="min-w-0">
-          <div className="sticky top-14 z-20 border-b border-border bg-background/95 pt-2 backdrop-blur">
-            <div className="rail flex gap-1 overflow-x-auto px-3 no-scrollbar sm:px-5">
-              {TABS.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "shrink-0 rounded-full px-4 py-2 text-sm font-semibold",
-                    tab === t
-                      ? "bg-foreground text-background"
-                      : "text-muted-foreground hover:bg-secondary",
-                  )}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-2 px-3 py-2 sm:px-5">
-              <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-secondary px-3 py-2">
-                <Search className="size-4 shrink-0 text-muted-foreground" />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Headlines, topics, journalists, places"
-                  aria-label="Search news"
-                  className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                />
-              </div>
-              {query.trim() && (
-                <select
-                  value={scope}
-                  onChange={(e) => setScope(e.target.value as (typeof SEARCH_SCOPES)[number])}
-                  aria-label="Search scope"
-                  className="shrink-0 rounded-full bg-secondary px-2 py-2 text-xs font-semibold"
-                >
-                  {SEARCH_SCOPES.map((s) => (
-                    <option key={s}>{s}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-            <div className="rail flex gap-1.5 overflow-x-auto px-3 pb-2 no-scrollbar sm:px-5 lg:hidden">
-              {CATEGORIES.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setCategory(c)}
-                  className={cn(
-                    "shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold",
-                    category === c
-                      ? "bg-brand text-brand-foreground"
-                      : "bg-secondary text-muted-foreground",
-                  )}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
+      <div className="mx-auto w-full max-w-2xl">
+        <div className="px-4 pt-3">
+          <h1 className="text-xl font-black tracking-tight text-foreground">Today&apos;s News</h1>
+          <div className="mt-2.5 flex items-center gap-2 rounded-full bg-secondary px-3.5 py-2.5">
+            <Search className="size-4 shrink-0 text-muted-foreground" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search stories, topics, people"
+              aria-label="Search stories, topics, people"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
           </div>
-
-          {tab === "Local" && (
-            <div className="flex items-center gap-2 px-4 pt-3 sm:px-6">
-              <MapPin className="size-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">Near</span>
-              <select
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                aria-label="Your city"
-                className="rounded-full bg-secondary px-3 py-1.5 text-xs font-bold"
+          <div className="mt-1 flex gap-5 border-b border-border">
+            {TABS.map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                aria-pressed={tab === t}
+                className={cn(
+                  "relative py-2.5 text-sm",
+                  tab === t ? "font-bold text-foreground" : "font-medium text-muted-foreground",
+                )}
               >
-                {CITIES.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
-              </select>
-            </div>
-          )}
+                {t}
+                {tab === t && (
+                  <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-foreground" />
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
 
-          {tab === "Saved" && (
-            <div className="flex gap-1.5 px-4 pt-3 sm:px-6">
-              {(["All", "Unread"] as const).map((f) => (
+        {!live && stories.length > 0 && (
+          <p className="px-4 pt-2 text-[11px] text-muted-foreground">
+            Live topics from posts — run part8_news.sql for curated stories.
+          </p>
+        )}
+        {needle.length >= 2 && (people.length > 0 || matchingTrends.length > 0) && (
+          <>
+            {people.length > 0 && (
+              <section className="border-b border-border" aria-label="People">
+                <h2 className="px-4 pb-1 pt-3 text-sm font-extrabold text-foreground">People</h2>
+                <div className="divide-y divide-border">
+                  {people.map((p) => (
+                    <Link
+                      key={p.id}
+                      to="/u/$username"
+                      params={{ username: p.username }}
+                      className="flex items-center gap-3 px-4 py-2.5"
+                    >
+                      {p.avatar_url ? (
+                        <img
+                          src={p.avatar_url}
+                          alt={p.display_name}
+                          loading="lazy"
+                          className="size-9 shrink-0 rounded-full object-cover"
+                        />
+                      ) : (
+                        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-secondary text-xs font-bold text-foreground">
+                          {p.display_name.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-bold text-foreground">
+                          {p.display_name}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          @{p.username}
+                        </span>
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </section>
+            )}
+            {matchingTrends.length > 0 && (
+              <section className="border-b border-border" aria-label="Topics">
+                <h2 className="px-4 pb-1 pt-3 text-sm font-extrabold text-foreground">Topics</h2>
+                <div className="flex flex-wrap gap-1.5 px-4 pb-3">
+                  {matchingTrends.slice(0, 8).map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setQuery(t.label)}
+                      className="rounded-full bg-secondary px-3.5 py-1.5 text-xs font-bold text-foreground"
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        )}
+        {feed.length === 0 ? (
+          <EmptyState
+            title={
+              tab === "Saved"
+                ? "No saved stories"
+                : tab === "Following"
+                  ? "Nothing from your follows yet"
+                  : "No stories found"
+            }
+            body={
+              tab === "Saved"
+                ? "Save any story from its ••• menu to build your reading list."
+                : tab === "Following"
+                  ? "Follow topics and stories to fill this feed."
+                  : "Try different words or check back later."
+            }
+          />
+        ) : (
+          <div className="divide-y divide-border">
+            {feed.map((s) => (
+              <StoryListItem key={s.id} story={s} />
+            ))}
+          </div>
+        )}
+
+        {visibleTrends.length > 0 && (
+          <section className="mt-2 border-t border-border pt-1" aria-label="Trending">
+            <h2 className="px-4 pb-1 pt-3 text-sm font-extrabold text-foreground">Trending</h2>
+            <div className="divide-y divide-border">
+              {visibleTrends.map((t) => (
+                <TrendRow
+                  key={t.id}
+                  label={t.label}
+                  context={t.context || "Trending"}
+                  count={t.postCount}
+                  followed={prefs.topics.includes(t.label.replace(/^#/, "").toLowerCase())}
+                  onFollow={() => prefs.toggleTopic(t.label)}
+                  onHide={() => setHiddenTrends((prev) => [...prev, t.id])}
+                  onMute={() => setMutedTrends((prev) => [...prev, t.id])}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className="mt-2 border-t border-border pt-1" aria-label="Discover">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4">
+            <h2 className="pb-1 pt-3 text-sm font-extrabold text-foreground">Discover</h2>
+            <div className="flex min-w-0 justify-end gap-3 overflow-x-auto no-scrollbar">
+              {DISCOVER_FILTERS.map((f) => (
                 <button
                   key={f}
-                  onClick={() => setSavedFilter(f)}
+                  onClick={() => setDiscover(f)}
                   className={cn(
-                    "rounded-full px-4 py-1.5 text-xs font-bold",
-                    savedFilter === f
-                      ? "bg-foreground text-background"
-                      : "bg-secondary text-muted-foreground",
+                    "shrink-0 text-sm font-semibold",
+                    discover === f ? "text-brand" : "text-muted-foreground",
                   )}
                 >
                   {f}
                 </button>
               ))}
             </div>
-          )}
-
-          {tab === "Following" && prefs.topics.length === 0 && prefs.sources.length === 0 && (
-            <EmptyBlock
-              title="Follow topics to personalize your news"
-              body="Tap any #tag or source to follow it. Your feed reshapes around what you follow."
-            />
-          )}
-          {tab === "Saved" && feed.length === 0 && (
-            <EmptyBlock
-              title="No saved stories"
-              body="Save any story to build your reading list."
-            />
-          )}
-          {tab === "Local" && feed.length === 0 && (
-            <EmptyBlock
-              title={`Nothing near ${city} yet`}
-              body="Try another city or check the main feed."
-            />
-          )}
-          {query.trim() && feed.length === 0 && (
-            <EmptyBlock
-              title="No results"
-              body={`We couldn't find anything matching "${query.trim()}".`}
-            />
-          )}
-
-          <div className="divide-y divide-border">
-            {feed.map((a) => (
-              <ThreadCard key={a.id} article={a} prefs={prefs} onShare={() => setSharing(a)} />
+          </div>
+          <div className="mt-3 grid auto-rows-[110px] grid-cols-2 gap-1 px-1 sm:auto-rows-[140px] sm:grid-cols-3">
+            {photos.map((p, index) => (
+              <figure
+                key={p.id}
+                className={cn(
+                  "overflow-hidden rounded-sm",
+                  index % 7 === 0 && "row-span-2",
+                  index % 7 === 3 && "col-span-2 row-span-2 sm:col-span-1",
+                  index % 7 === 5 && "sm:col-span-2",
+                )}
+              >
+                <button
+                  onClick={() => setViewing(p)}
+                  aria-label={`Open ${p.category} photo full screen`}
+                  className="block h-full w-full"
+                >
+                  <img
+                    src={imageUrl(p.key, "medium", p.aspect)}
+                    alt={`${p.category} photo by ${byId.get(p.authorId)?.displayName ?? "WIZZ creator"}`}
+                    loading="lazy"
+                    className="h-full w-full object-cover transition-transform duration-200 hover:scale-[1.03]"
+                  />
+                </button>
+              </figure>
             ))}
           </div>
-
-          {tab === "News" && !query.trim() && (
-            <section className="mt-3 border-t border-border pt-2">
-              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 sm:px-6">
-                <h3 className="text-lg font-extrabold tracking-tight">Discover</h3>
-                <div className="flex min-w-0 justify-end gap-3 overflow-x-auto no-scrollbar">
-                  {DISCOVER_FILTERS.map((f) => (
-                    <button
-                      key={f}
-                      onClick={() => setDiscover(f)}
-                      className={cn(
-                        "shrink-0 text-sm font-semibold",
-                        discover === f ? "text-brand" : "text-muted-foreground",
-                      )}
-                    >
-                      {f}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="mt-3 grid auto-rows-[110px] grid-cols-2 gap-1 px-1 sm:auto-rows-[140px] sm:grid-cols-3">
-                {photos.map((p, index) => (
-                  <figure
-                    key={p.id}
-                    className={cn(
-                      "overflow-hidden rounded-sm",
-                      index % 7 === 0 && "row-span-2",
-                      index % 7 === 3 && "col-span-2 row-span-2 sm:col-span-1",
-                      index % 7 === 5 && "sm:col-span-2",
-                    )}
-                  >
-                    <button
-                      onClick={() => setViewing(p)}
-                      aria-label={`Open ${p.category} photo full screen`}
-                      className="block h-full w-full"
-                    >
-                      <img
-                        src={imageUrl(p.key, "medium", p.aspect)}
-                        alt={`${p.category} photo by ${byId.get(p.authorId)?.displayName ?? "WIZZ creator"}`}
-                        loading="lazy"
-                        className="h-full w-full object-cover transition-transform duration-200 hover:scale-[1.03]"
-                      />
-                    </button>
-                  </figure>
-                ))}
-              </div>
-            </section>
-          )}
-          <div className="h-10" aria-hidden="true" />
-        </div>
-
-        {/* Right rail (wide desktop): trending */}
-        <aside className="hidden border-l border-border p-4 xl:block">
-          <p className="flex items-center gap-1.5 px-2 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            <Flame className="size-3.5" /> Trending
-          </p>
-          <ul className="mt-2 space-y-1">
-            {topics.slice(0, 6).map((t) => (
-              <li key={t.tag}>
-                <button
-                  onClick={() => {
-                    setQuery(`#${t.tag}`);
-                    setScope("Most discussed");
-                  }}
-                  className="block w-full rounded-xl px-3 py-2 text-left hover:bg-secondary"
-                >
-                  <p className="text-sm font-bold">#{t.tag}</p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {(t.discussions / 1000).toFixed(1)}K discussions · {t.updates} updates
-                  </p>
-                </button>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-4 px-2 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            Ranked by
-          </p>
-          <p className="mt-1 px-2 text-[11px] leading-relaxed text-muted-foreground">
-            Most discussed · most recent · most shared. Never editorial judgment.
-          </p>
-        </aside>
+        </section>
+        <div className="h-24" aria-hidden="true" />
       </div>
 
-      <ShareSheet
-        open={sharing !== null}
-        onClose={() => setSharing(null)}
-        url={
-          typeof window !== "undefined" && sharing
-            ? `${window.location.origin}/news/${sharing.id}`
-            : ""
-        }
-        message={sharing ? `${sharing.title} — ${sharing.sourceName} on WIZZ` : ""}
-      />
+      <button
+        onClick={() => openCreate()}
+        aria-label="Create post"
+        className="press fixed bottom-20 right-4 z-30 grid size-12 place-items-center rounded-full bg-brand text-brand-foreground shadow-lg"
+      >
+        <Plus className="size-6" />
+      </button>
 
       {viewing && (
         <div
@@ -426,7 +337,96 @@ export function NewsScreen() {
   );
 }
 
-function EmptyBlock({ title, body }: { title: string; body: string }) {
+function loadIds(key: string): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function TrendRow({
+  label,
+  context,
+  count,
+  followed,
+  onFollow,
+  onHide,
+  onMute,
+}: {
+  label: string;
+  context: string;
+  count: number;
+  followed: boolean;
+  onFollow: () => void;
+  onHide: () => void;
+  onMute: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <div className="flex items-center gap-2 px-4 py-2.5">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold text-foreground">{label}</p>
+        <p className="truncate text-xs text-muted-foreground">
+          {context}
+          {count > 0 ? ` · ${formatCount(count)} posts` : ""}
+          {followed ? " · Following" : ""}
+        </p>
+      </div>
+      <span className="relative shrink-0">
+        <button
+          aria-label={`Options for ${label}`}
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((v) => !v)}
+          className="rounded-full p-1.5 hover:bg-secondary"
+        >
+          <MoreHorizontal className="size-4 text-muted-foreground" />
+        </button>
+        {menuOpen && (
+          <>
+            <button
+              aria-label="Close menu"
+              onClick={() => setMenuOpen(false)}
+              className="fixed inset-0 z-10 cursor-default"
+            />
+            <div className="absolute right-0 top-8 z-20 w-44 overflow-hidden rounded-2xl border border-border bg-card shadow-raise">
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onFollow();
+                }}
+                className="block w-full px-3 py-2.5 text-left text-sm font-medium hover:bg-secondary"
+              >
+                {followed ? "Unfollow topic" : "Follow topic"}
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onHide();
+                }}
+                className="block w-full px-3 py-2.5 text-left text-sm font-medium hover:bg-secondary"
+              >
+                Not interested
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onMute();
+                }}
+                className="block w-full px-3 py-2.5 text-left text-sm font-medium hover:bg-secondary"
+              >
+                Mute this trend
+              </button>
+            </div>
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
   return (
     <div className="px-6 py-10 text-center">
       <p className="text-sm font-bold text-foreground">{title}</p>
@@ -435,180 +435,16 @@ function EmptyBlock({ title, body }: { title: string; body: string }) {
   );
 }
 
-function ThreadCard({
-  article: a,
-  prefs,
-  onShare,
-}: {
-  article: NewsArticle;
-  prefs: ReturnType<typeof useNewsPrefs>;
-  onShare: () => void;
-}) {
-  const liked = prefs.liked.includes(a.id);
-  const saved = prefs.saved.includes(a.id);
-  const reposted = prefs.reposted.includes(a.id);
-  const followingSource = prefs.sources.includes(a.sourceName.toLowerCase());
-  const likes = pseudo(a.id, 900, 60) + (liked ? 1 : 0);
-  const reposts = pseudo(a.id, 380, 12) + (reposted ? 1 : 0);
-  const firstTag = a.tags[0] ?? a.category.toLowerCase();
-  const followingTopic = prefs.topics.includes(firstTag.toLowerCase());
-
-  return (
-    <article className="animate-fade-up px-4 py-4 sm:px-6">
-      <div className="flex items-center gap-2.5">
-        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-secondary text-xs font-black">
-          {a.sourceName.slice(0, 1).toUpperCase()}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-1 truncate text-sm font-bold">
-            {a.sourceName}
-            <BadgeCheck className="size-3.5 shrink-0 text-brand" />
-          </p>
-          <p className="truncate text-xs text-muted-foreground">
-            @{a.sourceHandle} · {timeAgo(a.publishedAt)}
-          </p>
-        </div>
-        {!followingSource && (
-          <button
-            onClick={() => prefs.toggleSource(a.sourceName)}
-            className="shrink-0 rounded-full px-3 py-1.5 text-xs font-bold text-brand hover:bg-brand-soft"
-          >
-            Follow
-          </button>
-        )}
-      </div>
-
-      <Link to="/news/$articleId" params={{ articleId: a.id }} className="group mt-2.5 block">
-        {a.live && (
-          <span className="mb-1.5 inline-flex items-center gap-1.5 rounded-md bg-live/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-live">
-            <span className="size-1.5 animate-pulse rounded-full bg-live" /> Breaking
-            {a.updates.length > 0 ? ` · ${a.updates.length} updates` : ""}
-          </span>
-        )}
-        <h3 className="text-[17px] font-extrabold leading-snug tracking-tight group-hover:underline">
-          {a.title}
-        </h3>
-        <p className="mt-1 line-clamp-3 text-sm leading-relaxed text-muted-foreground">
-          {a.summary}
-        </p>
-        <span className="mt-2.5 block overflow-hidden rounded-2xl border border-border">
-          <img
-            src={imageUrl(a.imageKey, "medium", 16 / 10)}
-            alt={a.title}
-            loading="lazy"
-            className="aspect-[16/10] w-full object-cover"
-          />
-        </span>
-        <p className="mt-2 text-xs text-muted-foreground">
-          {a.location} · {a.readMinutes} min read
-        </p>
-      </Link>
-
-      <div className="mt-2 flex items-center gap-1">
-        <button
-          onClick={() => prefs.toggleLiked(a.id)}
-          aria-label="Like story"
-          aria-pressed={liked}
-          className="press flex items-center gap-1.5 rounded-full px-2.5 py-1.5 hover:bg-secondary"
-        >
-          <Heart
-            className={cn("size-4", liked ? "fill-live text-live" : "text-muted-foreground")}
-          />
-          <span className="text-xs font-semibold text-muted-foreground">
-            {compact.format(likes)}
-          </span>
-        </button>
-        <Link
-          to="/news/$articleId"
-          params={{ articleId: a.id }}
-          aria-label="Discuss"
-          className="flex items-center gap-1.5 rounded-full px-2.5 py-1.5 hover:bg-secondary"
-        >
-          <MessageCircle className="size-4 text-muted-foreground" />
-          <span className="text-xs font-semibold text-muted-foreground">
-            {compact.format(discussionCount(a.id))}
-          </span>
-        </Link>
-        <button
-          onClick={() => prefs.toggleReposted(a.id)}
-          aria-label="Repost"
-          aria-pressed={reposted}
-          className="press flex items-center gap-1.5 rounded-full px-2.5 py-1.5 hover:bg-secondary"
-        >
-          <Repeat2 className={cn("size-4", reposted ? "text-brand" : "text-muted-foreground")} />
-          <span className="text-xs font-semibold text-muted-foreground">
-            {compact.format(reposts)}
-          </span>
-        </button>
-        <button
-          onClick={onShare}
-          aria-label="Share"
-          className="rounded-full p-2 hover:bg-secondary"
-        >
-          <Share2 className="size-4 text-muted-foreground" />
-        </button>
-        <span className="flex-1" />
-        <button
-          onClick={() => prefs.toggleSaved(a.id)}
-          aria-label={saved ? "Unsave" : "Save"}
-          aria-pressed={saved}
-          className="press rounded-full p-2 hover:bg-secondary"
-        >
-          <Bookmark
-            className={cn("size-4", saved ? "fill-brand text-brand" : "text-muted-foreground")}
-          />
-        </button>
-        <button
-          onClick={() => prefs.toggleTopic(firstTag)}
-          className={cn(
-            "rounded-full px-3 py-1.5 text-xs font-bold",
-            followingTopic ? "bg-brand-soft text-brand" : "bg-secondary text-muted-foreground",
-          )}
-        >
-          {followingTopic ? "Following" : `#${firstTag}`}
-        </button>
-      </div>
-      {a.updates.length > 0 && (
-        <Link
-          to="/news/$articleId"
-          params={{ articleId: a.id }}
-          className="mt-1.5 inline-flex items-center gap-1 px-1 text-xs font-bold text-brand"
-        >
-          <Bell className="size-3.5" />
-          {a.live ? "Following this story" : `${a.updates.length} updates`} →
-        </Link>
-      )}
-    </article>
-  );
-}
-
-function timeAgo(iso: string): string {
-  const mins = Math.max(
-    1,
-    Math.round((Date.parse("2026-08-27T12:00:00.000Z") - Date.parse(iso)) / 60_000),
-  );
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.round(hours / 24)}d`;
-}
-
 export function NewsPending() {
   return (
     <AppShell title="News">
-      <div className="space-y-4 px-4 pt-4 sm:px-6">
-        <div className="h-9 w-full animate-pulse rounded-full bg-secondary" />
-        {[0, 1, 2].map((i) => (
-          <div key={i}>
-            <div className="flex items-center gap-2.5">
-              <div className="size-9 animate-pulse rounded-full bg-secondary" />
-              <div className="flex-1 space-y-1.5">
-                <div className="h-3.5 w-1/3 animate-pulse rounded bg-secondary" />
-                <div className="h-3 w-1/4 animate-pulse rounded bg-secondary" />
-              </div>
-            </div>
-            <div className="mt-2.5 h-5 w-11/12 animate-pulse rounded bg-secondary" />
-            <div className="mt-1.5 aspect-[16/10] w-full animate-pulse rounded-2xl bg-secondary" />
+      <div className="mx-auto w-full max-w-2xl space-y-3 px-4 pt-4">
+        <div className="h-7 w-40 animate-pulse rounded bg-secondary" />
+        <div className="h-10 w-full animate-pulse rounded-full bg-secondary" />
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="space-y-2 py-2">
+            <div className="h-4 w-11/12 animate-pulse rounded bg-secondary" />
+            <div className="h-3 w-1/3 animate-pulse rounded bg-secondary" />
           </div>
         ))}
       </div>

@@ -21,6 +21,7 @@ import { EmptyPostsArt } from "@/frontend/components/profile/EmptyPostsArt";
 import { useSession } from "@/frontend/hooks/useSession";
 import { useMyProfile } from "@/frontend/hooks/useMyProfile";
 import { useMyPosts, useMyStats } from "@/frontend/hooks/useMyProfileData";
+import { useMyStorySaves } from "@/frontend/hooks/useStoryDetail";
 import { useSavedPosts } from "@/frontend/hooks/useSavedPosts";
 
 import { supabase } from "@/integrations/supabase/client";
@@ -44,6 +45,7 @@ export function ProfileScreen() {
   const { data: myPosts = [] } = useMyPosts(userId);
   const { data: stats } = useMyStats(userId);
   const { data: savedPosts = [] } = useSavedPosts(userId);
+  const { data: savedStories = [] } = useMyStorySaves(userId);
 
   const [tab, setTab] = useState<(typeof tabs)[number]["id"]>("grid");
   const [shared, setShared] = useState(false);
@@ -350,6 +352,27 @@ export function ProfileScreen() {
           >
             Create
           </button>
+        </div>
+      )}
+      {tab === "saved" && savedStories.length > 0 && (
+        <div className="px-4 pt-4">
+          <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+            News stories ({savedStories.length})
+          </p>
+          <ul className="mt-2 divide-y divide-border rounded-2xl border border-border">
+            {savedStories.map((s) => (
+              <li key={s.id}>
+                <Link
+                  to="/news/$articleId"
+                  params={{ articleId: s.id }}
+                  className="block px-3 py-2.5"
+                >
+                  <span className="block truncate text-sm font-semibold">{s.headline}</span>
+                  <span className="block text-[11px] text-muted-foreground">{s.category}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {tab === "grid" && archivedPosts.length > 0 && (
