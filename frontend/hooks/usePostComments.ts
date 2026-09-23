@@ -48,7 +48,7 @@ export function usePostComments(postId: string | null, userId: string | null) {
       if (!postId) return { comments: [], total: 0 };
       const { data: rows, error } = await supabase
         .from("comments")
-        .select("id, body, created_at, author_id, profiles(username, display_name)")
+        .select("id, body, created_at, author_id, profiles!comments_author_id_fkey(username, display_name)")
         .eq("post_id", postId)
         .is("parent_id", null)
         .eq("is_deleted", false)
