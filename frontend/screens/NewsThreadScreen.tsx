@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams, useRouter } from "@tanstack/react-router"
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { ArrowLeft, ChevronLeft, Flag, Loader2, MoreHorizontal, Share2 } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { writeErrorMessage } from "@/frontend/lib/writeError";
 import { AppShell } from "@/frontend/components/AppShell";
 import { formatCount, newsTimeAgo } from "@/frontend/components/news/newsFormat";
 import { RelevantPersonRow } from "@/frontend/components/news/RelevantPersonRow";
@@ -45,13 +47,18 @@ export function NewsThreadScreen() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [reporting, setReporting] = useState(false);
+  const [viewingCover, setViewingCover] = useState(false);
   const [mutedAuthors, setMutedAuthors] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
+  const composerRef = useRef<HTMLInputElement | null>(null);
   const sentinel = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setTab("Top");
     setSummaryOpen(false);
     setMenuOpen(false);
+    setDraft("");
     reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storyId]);
@@ -101,6 +108,44 @@ export function NewsThreadScreen() {
       toast("Link copied.");
     } catch {
       toast("Could not copy link.");
+    }
+  }
+
+  /** Contribute a real post to this story (text posts need no media). */
+  async function post() {
+    const text = draft.trim();
+    if (!text || posting) return;
+    if (!userId) {
+      toast.error("Sign in to post about this story.");
+      return;
+    }
+    setPosting(true);
+    try {
+      const tag = story.synthetic ? story.id.slice(4) : story.category.toLowerCase();
+      const { data, error } = await supabase
+        .from("posts")
+        .insert({ author_id: userId, caption: text, hashtags: [tag], category: "News" })
+        .select("id")
+        .single();
+      if (error) throw error;
+      if (!story.synthetic && data) {
+        const { error: linkError } = await supabase
+          .from("story_posts")
+          .insert({ story_id: story.id, post_id: (data as { id: string }).id, relevance_score: 0 });
+        if (linkError) throw linkError;
+      }
+      setDraft("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["story-posts", storyId] }),
+        queryClient.invalidateQueries({ queryKey: ["news-story", storyId] }),
+        queryClient.invalidateQueries({ queryKey: ["news-stories"] }),
+      ]);
+      setTab("Latest");
+      toast("Posted to this story.");
+    } catch (e) {
+      toast.error(writeErrorMessage(e, "Could not post. Try again."));
+    } finally {
+      setPosting(false);
     }
   }
 
@@ -215,6 +260,20 @@ export function NewsThreadScreen() {
             </span>
             <span className="font-bold uppercase tracking-wider">· {story.state}</span>
           </p>
+          {story.coverImageUrl && (
+            <button
+              onClick={() => setViewingCover(true)}
+              aria-label="Open cover image full screen"
+              className="mt-3 block w-full"
+            >
+              <img
+                src={story.coverImageUrl}
+                alt={story.headline}
+                loading="lazy"
+                className="aspect-[16/10] w-full rounded-2xl border border-border object-cover"
+              />
+            </button>
+          )}
           {story.summary && (
             <p className="mt-2 text-[15px] leading-relaxed text-foreground">
               {cut ? `${short}…` : story.summary}{" "}
@@ -231,6 +290,24 @@ export function NewsThreadScreen() {
           <p className="mt-2 text-xs text-muted-foreground">
             This story is a summary of posts on WIZZ and may change as the conversation develops.
           </p>
+          <div className="mt-3 rounded-2xl bg-secondary p-3.5">
+            <p className="text-[11px] font-black uppercase tracking-widest text-muted-foreground">
+              Story details
+            </p>
+            <dl className="mt-1.5 space-y-1 text-[13px]">
+              {[
+                ["Category", story.category],
+                ["Status", story.state],
+                ["Published", newsTimeAgo(story.createdAt)],
+                ["Posts", `${formatCount(story.postCount)} in this thread`],
+              ].map(([k, v]) => (
+                <div key={k} className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-muted-foreground">{k}</dt>
+                  <dd className="font-semibold capitalize text-foreground">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
         </div>
 
         <div className="mt-2">
@@ -251,6 +328,27 @@ export function NewsThreadScreen() {
           </div>
         )}
 
+        <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+          <input
+            ref={composerRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void post();
+            }}
+            placeholder="Post about this story…"
+            aria-label="Post about this story"
+            className="min-w-0 flex-1 rounded-full bg-secondary px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+          />
+          <button
+            onClick={() => void post()}
+            disabled={!draft.trim() || posting}
+            className="shrink-0 rounded-full bg-foreground px-5 py-2.5 text-sm font-bold text-background disabled:opacity-50"
+          >
+            {posting ? "Posting…" : "Post"}
+          </button>
+        </div>
+
         {posts.isLoading ? (
           <div className="space-y-3 px-4 py-4">
             {[0, 1].map((i) => (
@@ -261,9 +359,20 @@ export function NewsThreadScreen() {
             ))}
           </div>
         ) : visible.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No posts in this story yet — be the first to post about it.
-          </p>
+          <div className="px-4 py-8 text-center">
+            <p className="text-sm text-muted-foreground">
+              No posts in this story yet — start the conversation.
+            </p>
+            <button
+              onClick={() => {
+                setTab("Latest");
+                composerRef.current?.focus();
+              }}
+              className="mt-3 rounded-full bg-foreground px-5 py-2 text-sm font-bold text-background"
+            >
+              Post about this story
+            </button>
+          </div>
         ) : (
           <div className="divide-y divide-border">
             {visible.map((p) => (
@@ -304,6 +413,20 @@ export function NewsThreadScreen() {
         url={shareUrl}
         message={`${story.headline} on WIZZ`}
       />
+      {viewingCover && story.coverImageUrl && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/95 p-4"
+          role="dialog"
+          aria-label="Cover image viewer"
+          onClick={() => setViewingCover(false)}
+        >
+          <img
+            src={story.coverImageUrl}
+            alt={story.headline}
+            className="max-h-full max-w-full rounded-2xl object-contain"
+          />
+        </div>
+      )}
       <ReportDialog
         open={reporting}
         onClose={() => setReporting(false)}

@@ -19,6 +19,23 @@ export function useSession() {
       setSession(data.session);
       setLoading(false);
     });
+    // Self-heal corpse sessions: a stored session whose token the server
+    // rejects (expired/revoked) breaks every write with 403s. Verify once;
+    // on a hard auth rejection (never on plain network failure) clear it so
+    // the UI honestly shows logged-out instead of silently failing writes.
+    supabase.auth.getUser().then(({ error }) => {
+      if (!active || !error) return;
+      const msg = error.message.toLowerCase();
+      const authDead =
+        msg.includes("invalid") ||
+        msg.includes("expired") ||
+        msg.includes("revoked") ||
+        msg.includes("not authenticated") ||
+        error.status === 401 ||
+        error.status === 403;
+      const offline = msg.includes("fetch") || msg.includes("network") || msg.includes("offline");
+      if (authDead && !offline) void supabase.auth.signOut();
+    });
     return () => {
       active = false;
       sub.subscription.unsubscribe();

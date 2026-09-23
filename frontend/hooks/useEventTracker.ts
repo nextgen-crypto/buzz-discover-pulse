@@ -42,6 +42,10 @@ export function useEventTracker(userId: string | null) {
     if (batch.length === 0) return;
     const uid = userRef.current;
     if (!uid) return; // signed-out buffer stays local-only
+    // Corpse session (user known, token dead) would 403 every flush and
+    // spam the console — verify first, drop quietly when logged out.
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session || sessionData.session.user.id !== uid) return;
     const { error } = await supabase.from("feed_events").insert(
       batch.map((e) => ({
         user_id: uid,

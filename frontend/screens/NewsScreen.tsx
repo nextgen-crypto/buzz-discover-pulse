@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearch } from "@tanstack/react-router";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { MoreHorizontal, Plus, Search } from "lucide-react";
+import { MoreHorizontal, Search } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { creators, explorePhotos } from "@/backend/database/seed";
 import { imageUrl } from "@/backend/domain/media";
 import { AppShell } from "@/frontend/components/AppShell";
 import { StoryListItem } from "@/frontend/components/news/StoryListItem";
 import { formatCount } from "@/frontend/components/news/newsFormat";
-import { openCreate } from "@/frontend/components/home/nav-items";
 import { newsStoriesQueryOptions } from "@/frontend/hooks/useNewsStories";
 import { trendingTopicsQueryOptions } from "@/frontend/hooks/useTrendingTopics";
 import { useNewsPrefs } from "@/frontend/hooks/useNewsPrefs";
@@ -296,14 +295,6 @@ export function NewsScreen() {
         </section>
         <div className="h-24" aria-hidden="true" />
       </div>
-
-      <button
-        onClick={() => openCreate()}
-        aria-label="Create post"
-        className="press fixed bottom-20 right-4 z-30 grid size-12 place-items-center rounded-full bg-brand text-brand-foreground shadow-lg"
-      >
-        <Plus className="size-6" />
-      </button>
 
       {viewing && (
         <div
