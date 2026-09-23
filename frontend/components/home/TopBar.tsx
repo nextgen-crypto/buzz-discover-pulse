@@ -604,7 +604,7 @@ export function TopBar() {
       </header>
 
       <Sheet open={open === "account"} onClose={close} title="Account & settings">
-        <div className="flex max-h-[72dvh] flex-col overflow-y-auto">
+        <div className="flex flex-col pb-2">
           {session ? (
             <Link
               to="/profile"

@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { respondFollowRequest } from "@/backend/api/social.functions";
 import { supabase } from "@/integrations/supabase/client";
+import { writeErrorMessage } from "@/frontend/lib/writeError";
 
 export interface FollowRequest {
   requester_id: string;
@@ -50,6 +52,9 @@ export function useFollowRequests(userId: string | null) {
       void queryClient.invalidateQueries({ queryKey: ["follow-requests", userId] });
       void queryClient.invalidateQueries({ queryKey: ["my-stats", userId] });
     },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not respond. Try again."));
+    },
   });
 
   return {
@@ -90,6 +95,9 @@ export function useOutgoingRequest(viewerId: string | null, profileId: string | 
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["follow-request-out", viewerId, profileId] });
     },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not send request. Try again."));
+    },
   });
 
   const withdraw = useMutation({
@@ -104,6 +112,9 @@ export function useOutgoingRequest(viewerId: string | null, profileId: string | 
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["follow-request-out", viewerId, profileId] });
+    },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not withdraw. Try again."));
     },
   });
 
@@ -153,6 +164,9 @@ export function useBlockState(viewerId: string | null, profileId: string | null)
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["block-state", viewerId, profileId] });
+    },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not update block. Try again."));
     },
   });
 

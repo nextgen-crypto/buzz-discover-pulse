@@ -9,6 +9,7 @@ import {
   Check,
   ChevronRight,
   Clock,
+  Crop,
   FolderOpen,
   ImagePlus,
   Link2,
@@ -26,7 +27,15 @@ import {
 } from "lucide-react";
 import { Sheet } from "@/frontend/components/overlays/Sheet";
 import { uploadAndSign } from "@/frontend/lib/storageUpload";
+import {
+  IMAGE_MAX_BYTES,
+  VIDEO_MAX_BYTES,
+  bakeOrOriginal,
+  sizeError,
+  videoPreviewable,
+} from "@/frontend/lib/mediaFormat";
 import { BeautyCameraSheet } from "@/frontend/components/camera/BeautyCameraSheet";
+import { CropSheet } from "@/frontend/components/create/CropSheet";
 import {
   applyFilterToFile,
   filterCss,
@@ -157,6 +166,7 @@ export function CreationEngine({
     temperature: 0,
   });
   const [camera, setCamera] = useState<null | "photo" | "short">(null);
+  const [cropping, setCropping] = useState(false);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [trim, setTrim] = useState<[number, number]>([0, 100]);
@@ -246,12 +256,22 @@ export function CreationEngine({
   }
 
   function attachPhoto(file: File) {
+    if (file.size > IMAGE_MAX_BYTES) {
+      setError(sizeError("image"));
+      return;
+    }
+    setError(null);
     if (photoUrl) URL.revokeObjectURL(photoUrl);
     setPhoto(file);
     setPhotoUrl(URL.createObjectURL(file));
   }
 
   function attachVideo(file: File) {
+    if (file.size > VIDEO_MAX_BYTES) {
+      setError(sizeError("video"));
+      return;
+    }
+    setError(null);
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoFile(file);
     setVideoUrl(URL.createObjectURL(file));
@@ -325,11 +345,9 @@ export function CreationEngine({
       let imageUrl: string | null = null;
       let videoUrl: string | null = null;
       if (photo && (kind === "photo" || kind === "story")) {
-        const baked = await applyFilterToFile(
-          photo,
-          preset.settings,
-          preset.extra,
-          intensity / 100,
+        // GIFs/SVGs and undecodable files upload as-is (filters need canvas).
+        const baked = await bakeOrOriginal(photo, (f) =>
+          applyFilterToFile(f, preset.settings, preset.extra, intensity / 100),
         );
         setProgress(35);
         imageUrl = await uploadAndSign("post-images", `${user.id}/post-${Date.now()}.jpg`, baked, {
@@ -468,6 +486,7 @@ export function CreationEngine({
             onCamera={() => setCamera("photo")}
             onUpload={() => fileRef.current?.click()}
             onContinue={goComposer}
+            onCrop={() => setCropping(true)}
             error={error}
           />
         )}
@@ -475,6 +494,7 @@ export function CreationEngine({
         {step === "video" && (
           <VideoStep
             videoUrl={videoUrl}
+            playable={videoFile ? videoPreviewable(videoFile) : true}
             trim={trim}
             setTrim={setTrim}
             speed={speed}
@@ -957,6 +977,17 @@ export function CreationEngine({
           setCamera(null);
         }}
       />
+      {cropping && photoUrl && (
+        <CropSheet
+          open
+          onClose={() => setCropping(false)}
+          imageSrc={photoUrl}
+          onDone={(f) => {
+            attachPhoto(f);
+            setCropping(false);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -1005,6 +1036,7 @@ function PhotoStep({
   onCamera,
   onUpload,
   onContinue,
+  onCrop,
   error,
 }: {
   photoUrl: string | null;
@@ -1023,6 +1055,7 @@ function PhotoStep({
   onCamera: () => void;
   onUpload: () => void;
   onContinue: () => void;
+  onCrop: () => void;
   error: string | null;
 }) {
   const [tab, setTab] = useState<"filters" | "adjust">("filters");
@@ -1043,19 +1076,28 @@ function PhotoStep({
         >
           <ImagePlus className="size-6 text-brand" />
           <span className="text-sm font-semibold">Gallery</span>
-          <span className="text-xs text-muted-foreground">JPG or PNG, 10 MB</span>
+          <span className="text-xs text-muted-foreground">Any format · up to 25 MB</span>
         </button>
       </div>
     );
   }
   return (
     <div className="space-y-3">
-      <img
-        src={photoUrl}
-        alt="Edit preview"
-        style={{ filter: photoFilter }}
-        className="max-h-72 w-full rounded-2xl border border-border object-cover"
-      />
+      <div className="relative">
+        <img
+          src={photoUrl}
+          alt="Edit preview"
+          style={{ filter: photoFilter }}
+          className="max-h-72 w-full rounded-2xl border border-border object-cover"
+        />
+        <button
+          onClick={onCrop}
+          aria-label="Crop photo"
+          className="absolute left-2 top-2 flex items-center gap-1.5 rounded-full bg-scrim px-3 py-1.5 text-xs font-bold text-white"
+        >
+          <Crop className="size-3.5" /> Crop
+        </button>
+      </div>
       <div className="flex rounded-full bg-secondary p-1">
         {(["filters", "adjust"] as const).map((t) => (
           <button
@@ -1147,6 +1189,7 @@ function PhotoStep({
 
 function VideoStep({
   videoUrl,
+  playable,
   trim,
   setTrim,
   speed,
@@ -1161,6 +1204,7 @@ function VideoStep({
   error,
 }: {
   videoUrl: string | null;
+  playable: boolean;
   trim: [number, number];
   setTrim: (v: [number, number]) => void;
   speed: number;
@@ -1192,7 +1236,7 @@ function VideoStep({
         >
           <ImagePlus className="size-6 text-brand" />
           <span className="text-sm font-semibold">Upload</span>
-          <span className="text-xs text-muted-foreground">From your gallery</span>
+          <span className="text-xs text-muted-foreground">Any video format · up to 200 MB</span>
         </button>
       </div>
     );
@@ -1207,6 +1251,12 @@ function VideoStep({
         muted={muted}
         className="max-h-72 w-full rounded-2xl border border-border bg-media object-cover"
       />
+      {!playable && (
+        <p className="rounded-xl bg-secondary px-3 py-2 text-xs text-muted-foreground">
+          This device can&apos;t preview this format, but it will still post —
+          most phones play it fine.
+        </p>
+      )}
       <div className="rounded-2xl bg-secondary p-3">
         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
           <span>Trim</span>

@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { writeErrorMessage } from "@/frontend/lib/writeError";
 
 export type SavedPost = {
   id: string;
@@ -54,6 +56,9 @@ export function useToggleSave(userId: string | null) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["saved-posts", userId] });
+    },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not save. Try again."));
     },
   });
 }

@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { writeErrorMessage } from "@/frontend/lib/writeError";
 
 /** Real post likes (uuid posts). Seed items keep local-only state. */
 export function usePostLikes(postId: string | null, userId: string | null) {
@@ -49,6 +51,9 @@ export function usePostLikes(postId: string | null, userId: string | null) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: key });
+    },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not like. Try again."));
     },
   });
 

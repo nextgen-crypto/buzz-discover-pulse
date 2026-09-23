@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { Camera, ImagePlus, Loader2, MapPin, X } from "lucide-react";
+import { Camera, Crop, ImagePlus, Loader2, MapPin, X } from "lucide-react";
 import { Sheet } from "@/frontend/components/overlays/Sheet";
+import { CropSheet } from "@/frontend/components/create/CropSheet";
 import { uploadAndSign } from "@/frontend/lib/storageUpload";
+import { IMAGE_MAX_BYTES, bakeOrOriginal, sizeError } from "@/frontend/lib/mediaFormat";
 import { BeautyCameraSheet } from "@/frontend/components/camera/BeautyCameraSheet";
 import {
   applyFilterToFile,
@@ -24,6 +26,7 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
 
   const [photo, setPhoto] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [cropping, setCropping] = useState(false);
   const [preset, setPreset] = useState<FilterPreset>(filterPresets[0]!);
   const [camera, setCamera] = useState(false);
   const [caption, setCaption] = useState("");
@@ -47,8 +50,8 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
   }, [open]);
 
   function pickImage(file: File) {
-    if (file.size > 10 * 1024 * 1024) {
-      setError("Photos must be under 10 MB.");
+    if (file.size > IMAGE_MAX_BYTES) {
+      setError(sizeError("image"));
       return;
     }
     setError(null);
@@ -60,8 +63,11 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
     if (!photo || !user) return null;
     setUploading(true);
     try {
+      // GIFs/SVGs and undecodable files upload as-is to preserve them.
       const baked =
-        preset.id === "none" ? photo : await applyFilterToFile(photo, preset.settings, preset.extra);
+        preset.id === "none"
+          ? photo
+          : await bakeOrOriginal(photo, (f) => applyFilterToFile(f, preset.settings, preset.extra));
       return await uploadAndSign("post-images", `${user.id}/post-${Date.now()}.jpg`, baked, {
         width: 1280,
       });
@@ -158,6 +164,13 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
                 >
                   <X className="size-4 text-white" />
                 </button>
+                <button
+                  aria-label="Crop photo"
+                  onClick={() => setCropping(true)}
+                  className="absolute left-2 top-2 flex items-center gap-1.5 rounded-full bg-scrim px-3 py-1.5 text-xs font-bold text-white"
+                >
+                  <Crop className="size-3.5" /> Crop
+                </button>
               </div>
               <div className="rail flex gap-2 overflow-x-auto pb-1">
                 {filterPresets.map((p) => (
@@ -195,7 +208,7 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
                   <ImagePlus className="size-6 text-brand" />
                 )}
                 <span className="text-sm font-semibold text-foreground">Add a photo</span>
-                <span className="text-xs text-muted-foreground">JPG or PNG, 10 MB</span>
+                <span className="text-xs text-muted-foreground">Any format · up to 25 MB</span>
               </button>
             </div>
           )}
@@ -206,6 +219,17 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
             onClose={() => setCamera(false)}
             onCapture={pickImage}
           />
+          {cropping && preview && (
+            <CropSheet
+              open
+              onClose={() => setCropping(false)}
+              imageSrc={preview}
+              onDone={(f) => {
+                pickImage(f);
+                setCropping(false);
+              }}
+            />
+          )}
 
           <label className="block">
             <span className="text-xs font-semibold text-muted-foreground">Caption</span>

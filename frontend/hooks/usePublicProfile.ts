@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import type { MyProfile } from "@/frontend/hooks/useMyProfile";
 import type { ProfilePost, ProfileStats } from "@/frontend/hooks/useMyProfileData";
+import { writeErrorMessage } from "@/frontend/lib/writeError";
 
 export type PublicProfile = MyProfile;
 
@@ -117,6 +119,9 @@ export function useFollowState(viewerId: string | null, profileId: string | null
       void queryClient.invalidateQueries({ queryKey: ["profile-stats"] });
       void queryClient.invalidateQueries({ queryKey: ["my-stats"] });
       void queryClient.invalidateQueries({ queryKey: ["follow-list"] });
+    },
+    onError: (e) => {
+      toast.error(writeErrorMessage(e, "Could not follow. Try again."));
     },
   });
 
