@@ -1,4 +1,4 @@
-// Bring-your-own Supabase client (replaces the Lovable-managed variant).
+// Bring-your-own Supabase client against the project's own Supabase instance.
 // Standard browser auth (localStorage + PKCE), no preview broker.
 // Reads VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY (.env).
 import { createClient } from "@supabase/supabase-js";

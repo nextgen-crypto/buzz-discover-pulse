@@ -1,10 +1,9 @@
-<!-- LOVABLE:BEGIN -->
+# WIZZ — agent working agreement
+
 > [!IMPORTANT]
-> This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
-> published git history — force pushing, or rebasing/amending/squashing commits
-> that are already pushed — as it rewrites history on Lovable's side and the
-> user will likely lose their project history.
->
-> Commits you push to the connected branch sync back to Lovable and show up in
-> the editor, so keep the branch in a working state.
-<!-- LOVABLE:END -->
+> Never rewrite published git history — no force pushing, rebasing, amending,
+> or squashing commits that are already pushed to `main`.
+
+Keep the branch in a working state: every commit should build (`npm run build`)
+and keep the app's graceful-degradation guarantees (missing backend tables must
+fall back to local/demo data, never blank screens).

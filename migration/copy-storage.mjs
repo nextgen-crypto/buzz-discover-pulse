@@ -1,8 +1,8 @@
 /**
  * Copy Supabase Storage buckets + objects from one project to another.
  *
- *   SRC_URL="<lovable VITE_SUPABASE_URL>" \
- *   SRC_SERVICE_KEY="<lovable service_role key>" \
+ *   SRC_URL="<source VITE_SUPABASE_URL>" \
+ *   SRC_SERVICE_KEY="<source service_role key>" \
  *   DST_URL="https://<your-ref>.supabase.co" \
  *   DST_SERVICE_KEY="<your service_role key>" \
  *   node migration/copy-storage.mjs [--dry-run] [--buckets avatars,post-images]
