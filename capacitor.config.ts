@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: 'wizz.app',            // jina la app yako halisi
   webDir: '.output/public',
   server: {
-    url: 'https://wizz-six.vercel.app',  // link halisi ya app yako iliyo-deployed
+    url: 'https://buzz-discover-pulse-juz7.vercel.app/',  // link halisi ya app yako iliyo-deployed
     cleartext: false,
   },
 };
