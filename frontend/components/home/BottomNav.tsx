@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
 import { CreationEngine } from "@/frontend/components/create/creationEngine";
 import { left, right, type CreateKind } from "@/frontend/components/home/nav-items";
 
@@ -62,17 +61,6 @@ export function BottomNav() {
           {left.map((item) => (
             <Tab key={item.to} {...item} />
           ))}
-
-          <button
-            aria-label="Create"
-            onClick={() => {
-              setInitialKind(null);
-              setCreateOpen(true);
-            }}
-            className="press mx-1 grid size-10 shrink-0 place-items-center rounded-full bg-brand min-[390px]:mx-2"
-          >
-            <Plus className="size-5 text-white" strokeWidth={2.5} />
-          </button>
 
           {right.map((item) => (
             <Tab key={item.to} {...item} />

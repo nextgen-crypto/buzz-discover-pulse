@@ -10,6 +10,7 @@ import {
   MoreHorizontal,
   Pin,
   Play,
+  Plus,
   Share2,
   UserPlus,
 } from "lucide-react";
@@ -142,17 +143,26 @@ export function ProfileScreen() {
 
       <div className="animate-fade-up px-4">
         <div className="-mt-10 grid grid-cols-[auto_minmax(0,1fr)] items-end gap-3">
-          {shownAvatar ? (
-            <img
-              src={shownAvatar}
-              alt={shownName}
-              className="animate-scale-in size-20 rounded-2xl border-4 border-background object-cover"
-            />
-          ) : (
-            <span className="animate-scale-in grid size-20 place-items-center rounded-2xl border-4 border-background bg-brand text-2xl font-bold text-brand-foreground">
-              {shownName.slice(0, 1).toUpperCase()}
-            </span>
-          )}
+          <span className="relative">
+            {shownAvatar ? (
+              <img
+                src={shownAvatar}
+                alt={shownName}
+                className="animate-scale-in size-20 rounded-2xl border-4 border-background object-cover"
+              />
+            ) : (
+              <span className="animate-scale-in grid size-20 place-items-center rounded-2xl border-4 border-background bg-brand text-2xl font-bold text-brand-foreground">
+                {shownName.slice(0, 1).toUpperCase()}
+              </span>
+            )}
+            <button
+              onClick={() => openCreate()}
+              aria-label="Create post"
+              className="press absolute -bottom-1.5 -right-1.5 grid size-7 place-items-center rounded-full bg-brand text-brand-foreground ring-4 ring-background"
+            >
+              <Plus className="size-4" strokeWidth={2.5} />
+            </button>
+          </span>
           <div className="mb-1 flex min-w-0 flex-wrap items-center justify-end gap-2">
             <button
               aria-label={shared ? "Link copied" : "Share profile"}
