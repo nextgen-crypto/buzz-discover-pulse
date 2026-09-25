@@ -1,4 +1,17 @@
 import { createServerFn } from "@tanstack/react-start";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+
+function requireAdmin(context: unknown): void {
+  const claims = (context as { claims?: { email?: string } }).claims;
+  const email = claims?.email?.trim().toLowerCase();
+  const allowed = (process.env["VITE_ADMIN_EMAILS"] ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (!email || !allowed.includes(email)) {
+    throw new Error("Unauthorized: admin access required.");
+  }
+}
 
 export interface AdminReport {
   id: string;
@@ -28,53 +41,60 @@ function isUuid(v: string | null | undefined): v is string {
 }
 
 /** All reports, newest first. Requires SUPABASE_SERVICE_ROLE_KEY. */
-export const fetchAdminReports = createServerFn({ method: "GET" }).handler(
-  async (): Promise<{
-    reports: AdminReport[];
-    live: boolean;
-  }> => {
-    try {
-      const db = await adminDb();
-      const { data, error } = await db
-        .from("reports")
-        .select(
-          "id, kind, ref_id, ref_title, reporter_id, target_user_id, reason, details, status, resolution, created_at",
-        )
-        .order("created_at", { ascending: false })
-        .limit(200);
-      if (error) throw error;
-      const rows = (data ?? []) as Omit<AdminReport, "reporter_name">[];
-      const reporterIds = [...new Set(rows.map((r) => r.reporter_id))];
-      const names = new Map<string, string>();
-      if (reporterIds.length > 0) {
-        const { data: profiles } = await db
-          .from("profiles")
-          .select("id, username")
-          .in("id", reporterIds);
-        for (const p of (profiles ?? []) as { id: string; username: string }[]) {
-          names.set(p.id, p.username);
+export const fetchAdminReports = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(
+    async ({
+      context,
+    }): Promise<{
+      reports: AdminReport[];
+      live: boolean;
+    }> => {
+      requireAdmin(context);
+      try {
+        const db = await adminDb();
+        const { data, error } = await db
+          .from("reports")
+          .select(
+            "id, kind, ref_id, ref_title, reporter_id, target_user_id, reason, details, status, resolution, created_at",
+          )
+          .order("created_at", { ascending: false })
+          .limit(200);
+        if (error) throw error;
+        const rows = (data ?? []) as Omit<AdminReport, "reporter_name">[];
+        const reporterIds = [...new Set(rows.map((r) => r.reporter_id))];
+        const names = new Map<string, string>();
+        if (reporterIds.length > 0) {
+          const { data: profiles } = await db
+            .from("profiles")
+            .select("id, username")
+            .in("id", reporterIds);
+          for (const p of (profiles ?? []) as { id: string; username: string }[]) {
+            names.set(p.id, p.username);
+          }
         }
+        return {
+          live: true,
+          reports: rows.map((r) => ({ ...r, reporter_name: names.get(r.reporter_id) ?? "?" })),
+        };
+      } catch {
+        return { reports: [], live: false };
       }
-      return {
-        live: true,
-        reports: rows.map((r) => ({ ...r, reporter_name: names.get(r.reporter_id) ?? "?" })),
-      };
-    } catch {
-      return { reports: [], live: false };
-    }
-  },
-);
+    },
+  );
 
 export type ResolveAction =
   "approve" | "remove_content" | "delete_content" | "warn" | "restrict" | "suspend" | "unsuspend";
 
 export const resolveAdminReport = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((data: { id?: string; action?: ResolveAction; note?: string } | undefined) => ({
     id: data?.id ?? "",
     action: data?.action ?? "approve",
     note: (data?.note ?? "").slice(0, 300),
   }))
-  .handler(async ({ data }): Promise<{ ok: boolean; detail: string }> => {
+  .handler(async ({ context, data }): Promise<{ ok: boolean; detail: string }> => {
+    requireAdmin(context);
     const db = await adminDb();
     const { data: report, error } = await db
       .from("reports")
@@ -145,11 +165,13 @@ export const resolveAdminReport = createServerFn({ method: "POST" })
 
 /** Send a warning straight to a user's inbox. */
 export const sendUserWarning = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((data: { userId?: string; message?: string } | undefined) => ({
     userId: data?.userId ?? "",
     message: (data?.message ?? "").slice(0, 300),
   }))
-  .handler(async ({ data }): Promise<{ ok: boolean }> => {
+  .handler(async ({ context, data }): Promise<{ ok: boolean }> => {
+    requireAdmin(context);
     if (!isUuid(data.userId)) throw new Error("Warnings need a real user account.");
     if (!data.message.trim()) throw new Error("Write the warning first.");
     const db = await adminDb();
@@ -188,8 +210,10 @@ export interface AdminCampaign {
   created_at: string;
 }
 
-export const fetchAdminCampaigns = createServerFn({ method: "GET" }).handler(
-  async (): Promise<{ campaigns: AdminCampaign[]; live: boolean }> => {
+export const fetchAdminCampaigns = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<{ campaigns: AdminCampaign[]; live: boolean }> => {
+    requireAdmin(context);
     try {
       const db = await adminDb();
       const { data, error } = await db
@@ -206,7 +230,10 @@ export const fetchAdminCampaigns = createServerFn({ method: "GET" }).handler(
       const names = new Map<string, string>();
       const captions = new Map<string, string>();
       if (advIds.length > 0) {
-        const { data: profiles } = await db.from("profiles").select("id, username").in("id", advIds);
+        const { data: profiles } = await db
+          .from("profiles")
+          .select("id, username")
+          .in("id", advIds);
         for (const p of (profiles ?? []) as { id: string; username: string }[]) {
           names.set(p.id, p.username);
         }
@@ -228,8 +255,7 @@ export const fetchAdminCampaigns = createServerFn({ method: "GET" }).handler(
     } catch {
       return { campaigns: [], live: false };
     }
-  },
-);
+  });
 
 export type CampaignReviewAction = "approve" | "reject" | "pause" | "resume" | "complete";
 
@@ -242,6 +268,7 @@ const CAMPAIGN_STATUS: Record<CampaignReviewAction, string> = {
 };
 
 export const reviewAdminCampaign = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator(
     (data: { id?: string; action?: CampaignReviewAction; note?: string } | undefined) => ({
       id: data?.id ?? "",
@@ -249,13 +276,14 @@ export const reviewAdminCampaign = createServerFn({ method: "POST" })
       note: (data?.note ?? "").slice(0, 300),
     }),
   )
-  .handler(async ({ data }): Promise<{ ok: boolean }> => {
+  .handler(async ({ context, data }): Promise<{ ok: boolean }> => {
+    requireAdmin(context);
     if (!isUuid(data.id)) throw new Error("Campaign not found.");
     if (!CAMPAIGN_STATUS[data.action]) throw new Error("Bad action.");
     const db = await adminDb();
-    const patch: Record<string, string> =
+    const patch =
       data.action === "reject"
-        ? { status: "rejected", rejection_reason: data.note }
+        ? { status: "rejected" as const, rejection_reason: data.note }
         : { status: CAMPAIGN_STATUS[data.action] };
     const { error } = await db.from("ad_campaigns").update(patch).eq("id", data.id);
     if (error) throw error;

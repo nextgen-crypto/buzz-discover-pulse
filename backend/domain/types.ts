@@ -64,6 +64,9 @@ export interface Post {
   metrics: PostMetrics;
   createdAt: string;
   visibility: Visibility;
+  /** Optional controls persisted for real database posts. */
+  commentsEnabled?: boolean;
+  allowSharing?: boolean;
   moderationStatus: ModerationStatus;
 }
 

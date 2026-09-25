@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import {
   BarChart3,
   Download,
@@ -17,7 +18,18 @@ import { PromoteSheet } from "@/frontend/components/ads/PromoteSheet";
 import { PostAnalyticsSheet } from "@/frontend/components/profile/PostAnalyticsSheet";
 import type { ProfilePost } from "@/frontend/hooks/useMyProfileData";
 import { supabase } from "@/integrations/supabase/client";
-import { uploadAndSign } from "@/frontend/lib/storageUpload";
+import {
+  removeStoredObjects,
+  uploadAndSign,
+  uploadStoredObject,
+} from "@/frontend/lib/storageUpload";
+import { extractHashtags } from "@/frontend/lib/hashtags";
+import { invalidateHomeCache } from "@/backend/api/home.functions";
+import {
+  deleteOwnedPost,
+  fetchPostingCapabilities,
+  setOwnedPostStatus,
+} from "@/backend/api/posts.functions";
 import { cn } from "@/lib/utils";
 
 async function audit(userId: string, action: string, refId: string) {
@@ -42,6 +54,10 @@ export function PostManageSheet({
   username?: string;
 }) {
   const queryClient = useQueryClient();
+  const bustCache = useServerFn(invalidateHomeCache);
+  const inspectPostingSchema = useServerFn(fetchPostingCapabilities);
+  const updateOwnedStatus = useServerFn(setOwnedPostStatus);
+  const deleteOwned = useServerFn(deleteOwnedPost);
   const fileRef = useRef<HTMLInputElement>(null);
   const [caption, setCaption] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<string | null>(null);
@@ -49,6 +65,7 @@ export function PostManageSheet({
   const [downloadsOn, setDownloadsOn] = useState<boolean | null>(null);
   const [remixOn, setRemixOn] = useState<boolean | null>(null);
   const [duetOn, setDuetOn] = useState<boolean | null>(null);
+  const [sharingOn, setSharingOn] = useState<boolean | null>(null);
   const [confirm, setConfirm] = useState<null | "archive" | "delete" | "wipe">(null);
   const [promoting, setPromoting] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
@@ -62,25 +79,37 @@ export function PostManageSheet({
   const editCaption = caption ?? post.caption;
   const editVisibility = visibility ?? post.visibility;
   const editComments = commentsOn ?? post.comments_enabled;
-  const editDownloads = downloadsOn ?? (post.allow_downloads ?? true);
-  const editRemix = remixOn ?? (post.allow_remix ?? true);
-  const editDuet = duetOn ?? (post.allow_duet ?? false);
+  const editDownloads = downloadsOn ?? post.allow_downloads ?? true;
+  const editRemix = remixOn ?? post.allow_remix ?? true;
+  const editDuet = duetOn ?? post.allow_duet ?? false;
+  const editSharing = sharingOn ?? post.allow_sharing ?? true;
   const dirty =
     editCaption !== post.caption ||
     editVisibility !== post.visibility ||
     editComments !== post.comments_enabled ||
     editDownloads !== (post.allow_downloads ?? true) ||
     editRemix !== (post.allow_remix ?? true) ||
-    editDuet !== (post.allow_duet ?? false);
+    editDuet !== (post.allow_duet ?? false) ||
+    editSharing !== (post.allow_sharing ?? true);
 
   const shareUrl =
     typeof window !== "undefined" && username ? `${window.location.origin}/u/${username}` : "";
   const thumb = post.thumbnail_url || post.image_url;
+  const hasMedia = Boolean(post.video_url || post.image_url);
 
   async function refresh() {
+    try {
+      await bustCache();
+    } catch {
+      // Server cache TTLs remain the fallback.
+    }
     await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["home"] }),
       queryClient.invalidateQueries({ queryKey: ["my-posts"] }),
       queryClient.invalidateQueries({ queryKey: ["my-stats"] }),
+      queryClient.invalidateQueries({ queryKey: ["profile-posts"] }),
+      queryClient.invalidateQueries({ queryKey: ["profile-stats"] }),
+      queryClient.invalidateQueries({ queryKey: ["saved-posts"] }),
     ]);
   }
 
@@ -88,13 +117,19 @@ export function PostManageSheet({
     setBusy(true);
     setError(null);
     try {
+      const originalCaptionTags = new Set(extractHashtags(post.caption));
+      const metadataTags = post.hashtags
+        .map((tag) => tag.trim().replace(/^#/, "").toLowerCase())
+        .filter((tag) => tag && !originalCaptionTags.has(tag));
       const full = {
         caption: editCaption.trim(),
+        hashtags: extractHashtags(editCaption, metadataTags.join(" ")),
         visibility: editVisibility,
         comments_enabled: editComments,
         allow_downloads: editDownloads,
         allow_remix: editRemix,
         allow_duet: editDuet,
+        allow_sharing: editSharing,
         is_edited: true,
       };
       let { error: err } = await supabase
@@ -102,12 +137,14 @@ export function PostManageSheet({
         .update(full)
         .eq("id", post.id)
         .eq("author_id", userId);
-      if (err && err.message.includes("column")) {
-        // Pre-part6 backend: persist the legacy fields so editing keeps working.
+      if (err && err.message.includes("column") && editSharing) {
+        // Pre-part6/new-posting backend: persist the legacy fields so editing
+        // keeps working. A disabled sharing control is never silently dropped.
         ({ error: err } = await supabase
           .from("posts")
           .update({
             caption: full.caption,
+            hashtags: full.hashtags,
             visibility: full.visibility,
             comments_enabled: full.comments_enabled,
             is_edited: true,
@@ -129,32 +166,15 @@ export function PostManageSheet({
       setDownloadsOn(null);
       setRemixOn(null);
       setDuetOn(null);
+      setSharingOn(null);
     }
   }
 
-  async function setStatus(status: "archived" | "published" | "deleted", action: string) {
+  async function setStatus(status: "archived" | "published" | "deleted") {
     setBusy(true);
     setError(null);
     try {
-      const { error: err } = await supabase
-        .from("posts")
-        .update({ status })
-        .eq("id", post.id)
-        .eq("author_id", userId);
-      if (err) throw err;
-      // Writes filtered by RLS succeed with zero rows and no error — verify.
-      const { data: check } = await supabase
-        .from("posts")
-        .select("id, status")
-        .eq("id", post.id)
-        .maybeSingle();
-      const row = check as { status: string } | null;
-      // Published rows are readable by the owner; anything else (archived /
-      // deleted) is hidden by RLS, which proves the write landed.
-      if (row && row.status === "published" && status !== "published") {
-        throw new Error("That didn't stick — sign out and back in, then retry.");
-      }
-      await audit(userId, action, post.id);
+      await updateOwnedStatus({ data: { postId: post.id, status } });
       await refresh();
       setConfirm(null);
       onClose();
@@ -188,24 +208,34 @@ export function PostManageSheet({
   async function uploadThumbnail(file: File) {
     setThumbBusy(true);
     setError(null);
+    const path = `${userId}/thumb-${post.id}-${Date.now()}.jpg`;
+    let committed = false;
     try {
-      const signedUrl = await uploadAndSign(
-        "post-images",
-        `${userId}/thumb-${post.id}-${Date.now()}.jpg`,
-        file,
-        { width: 800 },
-      );
+      const capabilities = await inspectPostingSchema();
+      const update = capabilities.media
+        ? await uploadStoredObject("post-images", path, file).then(() => ({
+            thumbnail_path: path,
+            thumbnail_url: "",
+          }))
+        : {
+            thumbnail_url: await uploadAndSign("post-images", path, file, { width: 800 }),
+          };
       const { error: err } = await supabase
         .from("posts")
-        .update({ thumbnail_url: signedUrl })
+        .update(update)
         .eq("id", post.id)
         .eq("author_id", userId);
       if (err) throw err;
+      committed = true;
+      await removeStoredObjects("post-images", [post.thumbnail_url, post.thumbnail_path]).catch(
+        () => undefined,
+      );
       await audit(userId, "post_thumbnail_changed", post.id);
       await refresh();
       onClose();
       toast("Thumbnail updated.");
     } catch (e) {
+      if (!committed) await removeStoredObjects("post-images", [path]).catch(() => undefined);
       setError(e instanceof Error ? e.message : "Thumbnail upload failed.");
     } finally {
       setThumbBusy(false);
@@ -216,12 +246,25 @@ export function PostManageSheet({
     setThumbBusy(true);
     setError(null);
     try {
-      const { error: err } = await supabase
+      const capabilities = await inspectPostingSchema();
+      let { error: err } = await supabase
         .from("posts")
-        .update({ thumbnail_url: "" })
+        .update(
+          capabilities.media ? { thumbnail_path: "", thumbnail_url: "" } : { thumbnail_url: "" },
+        )
         .eq("id", post.id)
         .eq("author_id", userId);
+      if (err && capabilities.media) {
+        ({ error: err } = await supabase
+          .from("posts")
+          .update({ thumbnail_url: "" })
+          .eq("id", post.id)
+          .eq("author_id", userId));
+      }
       if (err) throw err;
+      await removeStoredObjects("post-images", [post.thumbnail_url, post.thumbnail_path]).catch(
+        () => undefined,
+      );
       await refresh();
       onClose();
     } catch (e) {
@@ -245,24 +288,15 @@ export function PostManageSheet({
     setBusy(true);
     setError(null);
     try {
-      const { error: err } = await supabase
-        .from("posts")
-        .delete()
-        .eq("id", post.id)
-        .eq("author_id", userId);
-      if (err) {
-        if (err.message.toLowerCase().includes("foreign key")) {
-          throw new Error("This post is referenced elsewhere and can't be wiped. Archive it instead.");
-        }
-        throw err;
-      }
-      const { data: check } = await supabase
-        .from("posts")
-        .select("id")
-        .eq("id", post.id)
-        .maybeSingle();
-      if (check) throw new Error("That didn't stick — sign out and back in, then retry.");
-      await audit(userId, "post_deleted_permanent", post.id);
+      await deleteOwned({ data: { postId: post.id } });
+      await removeStoredObjects("post-images", [
+        post.thumbnail_url,
+        post.thumbnail_path,
+        post.image_url,
+        post.image_path,
+        post.video_url,
+        post.video_path,
+      ]).catch(() => undefined);
       await refresh();
       setConfirm(null);
       onClose();
@@ -274,10 +308,24 @@ export function PostManageSheet({
   }
 
   return (
-    <Sheet open={open} onClose={onClose} title="Manage post">
+    <Sheet
+      open={open}
+      onClose={() => {
+        if (!busy && !thumbBusy) onClose();
+      }}
+      title="Manage post"
+    >
       <div className="space-y-3 pb-2">
         <div className="flex items-center gap-3 rounded-2xl bg-secondary p-2.5">
-          {thumb ? (
+          {post.video_url ? (
+            <video
+              src={post.video_url}
+              muted
+              playsInline
+              preload="metadata"
+              className="size-14 rounded-xl bg-black object-cover"
+            />
+          ) : thumb ? (
             <img src={thumb} alt="" className="size-14 rounded-xl object-cover" />
           ) : (
             <span className="grid size-14 shrink-0 place-items-center rounded-xl bg-border text-[10px] text-muted-foreground">
@@ -319,9 +367,9 @@ export function PostManageSheet({
 
         <div className="grid grid-cols-4 gap-1.5">
           <QuickAction Icon={BarChart3} label="Analytics" onClick={() => setAnalyticsOpen(true)} />
-          {post.image_url ? (
+          {hasMedia ? (
             <a
-              href={post.image_url}
+              href={post.video_url || post.image_url!}
               download
               aria-label="Download original"
               className="flex flex-col items-center gap-1 rounded-2xl bg-secondary py-2.5 text-[11px] font-bold"
@@ -364,8 +412,21 @@ export function PostManageSheet({
             Settings
           </p>
           <div className="mt-1.5 grid grid-cols-2 gap-2">
-            <MiniToggle label="Comments" on={editComments} onFlip={() => setCommentsOn(!editComments)} />
-            <MiniToggle label="Downloads" on={editDownloads} onFlip={() => setDownloadsOn(!editDownloads)} />
+            <MiniToggle
+              label="Comments"
+              on={editComments}
+              onFlip={() => setCommentsOn(!editComments)}
+            />
+            <MiniToggle
+              label="Sharing"
+              on={editSharing}
+              onFlip={() => setSharingOn(!editSharing)}
+            />
+            <MiniToggle
+              label="Downloads"
+              on={editDownloads}
+              onFlip={() => setDownloadsOn(!editDownloads)}
+            />
             <MiniToggle label="Remix" on={editRemix} onFlip={() => setRemixOn(!editRemix)} />
             <MiniToggle label="Duet" on={editDuet} onFlip={() => setDuetOn(!editDuet)} />
           </div>
@@ -444,9 +505,17 @@ export function PostManageSheet({
         <div className="border-t border-border pt-3">
           {confirm === null && (
             <div className="flex gap-2">
-              {post.status === "archived" || post.status === "deleted" ? (
+              {post.status === "scheduled" ? (
                 <button
-                  onClick={() => void setStatus("published", "post_restored")}
+                  onClick={() => void setStatus("published")}
+                  disabled={busy}
+                  className="flex-1 rounded-full bg-brand py-2.5 text-sm font-semibold text-brand-foreground"
+                >
+                  Publish now
+                </button>
+              ) : post.status === "archived" || post.status === "deleted" ? (
+                <button
+                  onClick={() => void setStatus("published")}
                   disabled={busy}
                   className="flex-1 rounded-full bg-secondary py-2.5 text-sm font-semibold"
                 >
@@ -477,7 +546,7 @@ export function PostManageSheet({
               confirmLabel="Archive"
               busy={busy}
               onCancel={() => setConfirm(null)}
-              onConfirm={() => void setStatus("archived", "post_archived")}
+              onConfirm={() => void setStatus("archived")}
             />
           )}
           {confirm === "delete" && (
@@ -487,7 +556,7 @@ export function PostManageSheet({
               confirmLabel="Soft-delete"
               busy={busy}
               onCancel={() => setConfirm(null)}
-              onConfirm={() => void setStatus("deleted", "post_deleted")}
+              onConfirm={() => void setStatus("deleted")}
             />
           )}
           {confirm === null && (
@@ -514,12 +583,7 @@ export function PostManageSheet({
         {error && <p className="text-xs font-semibold text-live">{error}</p>}
       </div>
       {promoting && (
-        <PromoteSheet
-          open
-          onClose={() => setPromoting(false)}
-          userId={userId}
-          post={post}
-        />
+        <PromoteSheet open onClose={() => setPromoting(false)} userId={userId} post={post} />
       )}
       {analyticsOpen && (
         <PostAnalyticsSheet open onClose={() => setAnalyticsOpen(false)} post={post} />
@@ -555,15 +619,7 @@ function QuickAction({
   );
 }
 
-function MiniToggle({
-  label,
-  on,
-  onFlip,
-}: {
-  label: string;
-  on: boolean;
-  onFlip: () => void;
-}) {
+function MiniToggle({ label, on, onFlip }: { label: string; on: boolean; onFlip: () => void }) {
   return (
     <button
       role="switch"
@@ -573,7 +629,9 @@ function MiniToggle({
       className="flex w-full items-center justify-between rounded-xl border border-border bg-secondary px-3 py-2 text-sm font-semibold"
     >
       {label}
-      <span className={cn("relative h-6 w-11 shrink-0 rounded-full", on ? "bg-brand" : "bg-border")}>
+      <span
+        className={cn("relative h-6 w-11 shrink-0 rounded-full", on ? "bg-brand" : "bg-border")}
+      >
         <span
           className={cn(
             "absolute top-0.5 size-5 rounded-full bg-white shadow transition-all",

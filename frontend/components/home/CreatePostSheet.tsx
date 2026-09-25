@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { Camera, Crop, ImagePlus, Loader2, MapPin, X } from "lucide-react";
 import { Sheet } from "@/frontend/components/overlays/Sheet";
 import { CropSheet } from "@/frontend/components/create/CropSheet";
-import { uploadAndSign } from "@/frontend/lib/storageUpload";
+import { uploadAndSign, uploadStoredObject } from "@/frontend/lib/storageUpload";
 import { IMAGE_MAX_BYTES, bakeOrOriginal, sizeError } from "@/frontend/lib/mediaFormat";
 import { BeautyCameraSheet } from "@/frontend/components/camera/BeautyCameraSheet";
 import {
@@ -15,13 +16,14 @@ import {
 } from "@/frontend/components/camera/beautyFilters";
 import { useSession } from "@/frontend/hooks/useSession";
 import { supabase } from "@/integrations/supabase/client";
-
+import { fetchPostingCapabilities } from "@/backend/api/posts.functions";
 
 const categories = ["For You", "Trending", "Sports", "Music", "Tech", "Style", "Food", "Travel"];
 
 export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { user, loading } = useSession();
   const queryClient = useQueryClient();
+  const inspectPostingSchema = useServerFn(fetchPostingCapabilities);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [photo, setPhoto] = useState<File | null>(null);
@@ -59,7 +61,7 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
     setPreview(URL.createObjectURL(file));
   }
 
-  async function uploadPhoto(): Promise<string | null> {
+  async function uploadPhoto(): Promise<{ path: string; url: string | null } | null> {
     if (!photo || !user) return null;
     setUploading(true);
     try {
@@ -68,9 +70,16 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
         preset.id === "none"
           ? photo
           : await bakeOrOriginal(photo, (f) => applyFilterToFile(f, preset.settings, preset.extra));
-      return await uploadAndSign("post-images", `${user.id}/post-${Date.now()}.jpg`, baked, {
-        width: 1280,
-      });
+      const path = `${user.id}/post-${Date.now()}.jpg`;
+      const capabilities = await inspectPostingSchema();
+      if (capabilities.media) {
+        await uploadStoredObject("post-images", path, baked);
+        return { path, url: null };
+      }
+      return {
+        path,
+        url: await uploadAndSign("post-images", path, baked, { width: 1280 }),
+      };
     } finally {
       setUploading(false);
     }
@@ -91,11 +100,12 @@ export function CreatePostSheet({ open, onClose }: { open: boolean; onClose: () 
             .filter(Boolean),
         ),
       ];
-      const uploadedUrl = await uploadPhoto();
+      const uploaded = await uploadPhoto();
       const { error: insertError } = await supabase.from("posts").insert({
         author_id: user.id,
         caption: text,
-        image_url: uploadedUrl,
+        image_url: uploaded?.url ?? null,
+        ...(uploaded?.path ? { image_path: uploaded.path } : {}),
         hashtags,
         location: location.trim() || null,
         category,

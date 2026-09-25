@@ -1,14 +1,18 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { InterestProfile } from "@/backend/services/feedService";
 import type { SavedPost } from "@/frontend/hooks/useSavedPosts";
 
-const KEYS = {
+const KEY_PREFIX = {
   muted: "wizz:muted-authors",
   mutedNames: "wizz:muted-names",
   hidden: "wizz:hidden-posts",
   notInterested: "wizz:not-interested",
   watched: "wizz:watch-history",
 } as const;
+
+function scopedKey(prefix: string, userId: string | null): string {
+  return `${prefix}:${userId ?? "anonymous"}`;
+}
 
 function loadIds(key: string): string[] {
   try {
@@ -23,16 +27,38 @@ function saveIds(key: string, ids: string[]) {
   try {
     localStorage.setItem(key, JSON.stringify(ids.slice(0, 200)));
   } catch {
-    // ignore
+    // ignore unavailable storage
   }
 }
 
 type WatchMap = InterestProfile["watched"];
 
-function loadWatched(): WatchMap {
+function loadNames(key: string): Record<string, string> {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEYS.watched) ?? "{}") as unknown;
-    if (!raw || typeof raw !== "object") return {};
+    const raw = JSON.parse(localStorage.getItem(key) ?? "{}") as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        .slice(0, 200),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveNames(key: string, names: Record<string, string>) {
+  try {
+    localStorage.setItem(key, JSON.stringify(names));
+  } catch {
+    // ignore unavailable storage
+  }
+}
+
+function loadWatched(key: string): WatchMap {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) ?? "{}") as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
     const out: WatchMap = {};
     for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 100)) {
       const w = v as { plays?: unknown; completed?: unknown } | null;
@@ -51,25 +77,36 @@ function loadWatched(): WatchMap {
 
 /**
  * Viewer-side taste: mutes, hides, not-interested flags and video watch
- * history. Everything here becomes NegativeSignals + watchQuality input
- * for the ranker — the feed learns what you skip, not just what you tap.
+ * history. State is namespaced per account so a shared browser cannot carry
+ * one user's personalization into another account.
  */
-export function useFeedPrefs() {
-  const [muted, setMuted] = useState<string[]>(() => loadIds(KEYS.muted));
-  const [mutedNames, setMutedNames] = useState<Record<string, string>>(() => {
-    try {
-      return (JSON.parse(localStorage.getItem(KEYS.mutedNames) ?? "{}") ?? {}) as Record<
-        string,
-        string
-      >;
-    } catch {
-      return {};
-    }
-  });
-  const [hidden, setHidden] = useState<string[]>(() => loadIds(KEYS.hidden));
-  const [notInterested, setNotInterested] = useState<string[]>(() => loadIds(KEYS.notInterested));
-  const [watched, setWatched] = useState<WatchMap>(loadWatched);
+export function useFeedPrefs(userId: string | null = null) {
+  const keys = useMemo(
+    () => ({
+      muted: scopedKey(KEY_PREFIX.muted, userId),
+      mutedNames: scopedKey(KEY_PREFIX.mutedNames, userId),
+      hidden: scopedKey(KEY_PREFIX.hidden, userId),
+      notInterested: scopedKey(KEY_PREFIX.notInterested, userId),
+      watched: scopedKey(KEY_PREFIX.watched, userId),
+    }),
+    [userId],
+  );
+  const [muted, setMuted] = useState<string[]>(() => loadIds(keys.muted));
+  const [mutedNames, setMutedNames] = useState<Record<string, string>>(() =>
+    loadNames(keys.mutedNames),
+  );
+  const [hidden, setHidden] = useState<string[]>(() => loadIds(keys.hidden));
+  const [notInterested, setNotInterested] = useState<string[]>(() => loadIds(keys.notInterested));
+  const [watched, setWatched] = useState<WatchMap>(() => loadWatched(keys.watched));
   const [, setTick] = useState(0);
+
+  useEffect(() => {
+    setMuted(loadIds(keys.muted));
+    setMutedNames(loadNames(keys.mutedNames));
+    setHidden(loadIds(keys.hidden));
+    setNotInterested(loadIds(keys.notInterested));
+    setWatched(loadWatched(keys.watched));
+  }, [keys]);
 
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
@@ -77,86 +114,81 @@ export function useFeedPrefs() {
     (authorId: string, username?: string) => {
       setMuted((prev) => {
         const next = [...new Set([...prev, authorId])];
-        saveIds(KEYS.muted, next);
+        saveIds(keys.muted, next);
         return next;
       });
       if (username) {
         setMutedNames((prev) => {
           const next = { ...prev, [authorId]: username };
-          try {
-            localStorage.setItem(KEYS.mutedNames, JSON.stringify(next));
-          } catch {
-            // ignore
-          }
+          saveNames(keys.mutedNames, next);
           return next;
         });
       }
       refresh();
     },
-    [refresh],
+    [keys, refresh],
   );
 
   const unmuteAuthor = useCallback(
     (authorId: string) => {
       setMuted((prev) => {
         const next = prev.filter((id) => id !== authorId);
-        saveIds(KEYS.muted, next);
+        saveIds(keys.muted, next);
         return next;
       });
       setMutedNames((prev) => {
         const next = { ...prev };
         delete next[authorId];
-        try {
-          localStorage.setItem(KEYS.mutedNames, JSON.stringify(next));
-        } catch {
-          // ignore
-        }
+        saveNames(keys.mutedNames, next);
         return next;
       });
       refresh();
     },
-    [refresh],
+    [keys, refresh],
   );
 
   const hidePost = useCallback(
     (postId: string) => {
       setHidden((prev) => {
         const next = [...new Set([...prev, postId])];
-        saveIds(KEYS.hidden, next);
+        saveIds(keys.hidden, next);
         return next;
       });
       refresh();
     },
-    [refresh],
+    [keys, refresh],
   );
 
   const markNotInterested = useCallback(
     (postId: string) => {
       setNotInterested((prev) => {
         const next = [...new Set([...prev, postId])];
-        saveIds(KEYS.notInterested, next);
+        saveIds(keys.notInterested, next);
         return next;
       });
       refresh();
     },
-    [refresh],
+    [keys, refresh],
   );
 
-  const recordWatch = useCallback((postId: string, completed: boolean) => {
-    setWatched((prev) => {
-      const cur = prev[postId] ?? { plays: 0, completed: false };
-      const next: WatchMap = {
-        ...prev,
-        [postId]: { plays: Math.min(cur.plays + 1, 99), completed: cur.completed || completed },
-      };
-      try {
-        localStorage.setItem(KEYS.watched, JSON.stringify(next));
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }, []);
+  const recordWatch = useCallback(
+    (postId: string, completed: boolean) => {
+      setWatched((prev) => {
+        const cur = prev[postId] ?? { plays: 0, completed: false };
+        const next: WatchMap = {
+          ...prev,
+          [postId]: { plays: Math.min(cur.plays + 1, 99), completed: cur.completed || completed },
+        };
+        try {
+          localStorage.setItem(keys.watched, JSON.stringify(next));
+        } catch {
+          // ignore unavailable storage
+        }
+        return next;
+      });
+    },
+    [keys],
+  );
 
   return {
     muted,

@@ -1,4 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const OBJECTIVES = [
@@ -14,6 +16,7 @@ const OBJECTIVES = [
 ] as const;
 
 const PACKAGES = ["starter", "growth", "business", "custom"] as const;
+const MEDIA_URL_TTL_SECONDS = 5 * 60;
 
 /** Default budgets (cents) + durations mirror ad_packages seed rows. */
 const PACKAGE_DEFAULTS: Record<string, { budget: number; days: number }> = {
@@ -39,17 +42,19 @@ async function adminDb() {
 export const createCampaign = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator(
-    (data:
-      | {
-          postId?: string;
-          objective?: string;
-          package?: string;
-          budgetCents?: number;
-          durationDays?: number;
-          ctaLabel?: string;
-          ctaUrl?: string;
-        }
-      | undefined) => ({
+    (
+      data:
+        | {
+            postId?: string;
+            objective?: string;
+            package?: string;
+            budgetCents?: number;
+            durationDays?: number;
+            ctaLabel?: string;
+            ctaUrl?: string;
+          }
+        | undefined,
+    ) => ({
       postId: data?.postId ?? "",
       objective: data?.objective ?? "reach",
       package: data?.package ?? "starter",
@@ -76,7 +81,9 @@ export const createCampaign = createServerFn({ method: "POST" })
       .eq("author_id", me)
       .maybeSingle();
     if (postError || !post) throw new Error("Only your own posts can be promoted.");
-    const defaults = PACKAGE_DEFAULTS[data.package] ?? PACKAGE_DEFAULTS.starter!;
+    const defaults =
+      PACKAGE_DEFAULTS[data.package as keyof typeof PACKAGE_DEFAULTS] ??
+      PACKAGE_DEFAULTS["starter"]!;
     const days =
       data.package === "custom"
         ? Math.min(30, Math.max(1, Math.floor(data.durationDays) || 3))
@@ -105,7 +112,9 @@ export const createCampaign = createServerFn({ method: "POST" })
         targeting: {},
         cta_label: data.ctaLabel,
         cta_url:
-          data.ctaUrl && !/^https?:\/\//i.test(data.ctaUrl) ? `https://${data.ctaUrl}` : data.ctaUrl,
+          data.ctaUrl && !/^https?:\/\//i.test(data.ctaUrl)
+            ? `https://${data.ctaUrl}`
+            : data.ctaUrl,
         metadata: {},
       })
       .select("id")
@@ -136,7 +145,7 @@ export const listMyCampaigns = createServerFn({ method: "GET" })
     try {
       const me = (context as unknown as { userId: string }).userId;
       const { supabase } = context as unknown as {
-        supabase: ReturnType<typeof import("@/integrations/supabase/client.server").supabaseAdmin>;
+        supabase: SupabaseClient<Database>;
       };
       const { data, error } = await supabase
         .from("ad_campaigns")
@@ -162,8 +171,7 @@ export const updateMyCampaign = createServerFn({ method: "POST" })
   .handler(async ({ context, data }): Promise<{ ok: boolean }> => {
     const me = (context as unknown as { userId: string }).userId;
     if (!isUuid(data.id)) throw new Error("Campaign not found.");
-    const status =
-      data.action === "pause" ? "paused" : data.action === "resume" ? "active" : null;
+    const status = data.action === "pause" ? "paused" : data.action === "resume" ? "active" : null;
     const stop = data.action === "stop";
     if (!status && !stop) throw new Error("Bad action.");
     const db = await adminDb();
@@ -221,30 +229,71 @@ export const fetchActivePromotions = createServerFn({ method: "GET" }).handler(
       const postIds = [...new Set(rows.map((r) => r.post_id).filter((v): v is string => !!v))];
       const advIds = [...new Set(rows.map((r) => r.advertiser_id))];
       if (postIds.length === 0 || advIds.length === 0) return { promotions: [], live: true };
-      const [{ data: posts }, { data: profiles }] = await Promise.all([
-        db.from("posts").select("id, caption, image_url, author_id, created_at").in("id", postIds),
-        db
-          .from("profiles")
-          .select("id, username, display_name, avatar_url, verified")
-          .in("id", advIds),
-      ]);
-      const postById = new Map(
-        ((posts ?? []) as {
-          id: string;
-          caption: string;
-          image_url: string | null;
-          author_id: string;
-          created_at: string;
-        }[]).map((p) => [p.id, p]),
+      const currentPosts = await db
+        .from("posts")
+        .select("id, caption, image_url, image_path, author_id, created_at")
+        .in("id", postIds)
+        .eq("status", "published")
+        .eq("visibility", "public");
+      const compatiblePosts = currentPosts.error
+        ? await db
+            .from("posts")
+            .select("id, caption, image_url, author_id, created_at")
+            .in("id", postIds)
+            .eq("status", "published")
+            .eq("visibility", "public")
+        : currentPosts;
+      if (compatiblePosts.error) throw compatiblePosts.error;
+      const postRows = (compatiblePosts.data ?? []) as {
+        id: string;
+        caption: string;
+        image_url: string | null;
+        image_path?: string | null;
+        author_id: string;
+        created_at: string;
+      }[];
+      const allProfileIds = [...new Set([...advIds, ...postRows.map((post) => post.author_id)])];
+      const { data: profiles } = await db
+        .from("profiles")
+        .select("id, username, display_name, avatar_url, verified, is_private")
+        .in("id", allProfileIds);
+      const privateProfileIds = new Set(
+        ((profiles ?? []) as { id: string; is_private?: boolean }[])
+          .filter((profile) => profile.is_private)
+          .map((profile) => profile.id),
       );
+      const postById = new Map(
+        postRows
+          .filter((post) => !privateProfileIds.has(post.author_id))
+          .map((post) => [post.id, post]),
+      );
+      const mediaPaths = [...postById.values()].flatMap((post) =>
+        post.image_path ? [post.image_path] : [],
+      );
+      const signedMedia =
+        mediaPaths.length > 0
+          ? new Map(
+              (
+                (
+                  await db.storage
+                    .from("post-images")
+                    .createSignedUrls(mediaPaths, MEDIA_URL_TTL_SECONDS)
+                ).data ?? []
+              ).flatMap((item) =>
+                item.path && item.signedUrl ? [[item.path, item.signedUrl] as const] : [],
+              ),
+            )
+          : new Map<string, string>();
       const profById = new Map(
-        ((profiles ?? []) as {
-          id: string;
-          username: string;
-          display_name: string;
-          avatar_url: string | null;
-          verified: boolean;
-        }[]).map((p) => [p.id, p]),
+        (
+          (profiles ?? []) as {
+            id: string;
+            username: string;
+            display_name: string;
+            avatar_url: string | null;
+            verified: boolean;
+          }[]
+        ).map((p) => [p.id, p]),
       );
       const promotions: Promotion[] = [];
       for (const r of rows) {
@@ -256,7 +305,12 @@ export const fetchActivePromotions = createServerFn({ method: "GET" }).handler(
           objective: r.objective,
           ctaLabel: r.cta_label ?? "",
           ctaUrl: r.cta_url ?? "",
-          post: { id: p.id, caption: p.caption, image_url: p.image_url, created_at: p.created_at },
+          post: {
+            id: p.id,
+            caption: p.caption,
+            image_url: (p.image_path ? signedMedia.get(p.image_path) : null) ?? p.image_url,
+            created_at: p.created_at,
+          },
           author: {
             id: a.id,
             username: a.username,
@@ -301,7 +355,9 @@ export const logAdEvent = createServerFn({ method: "POST" })
         return { ok: true as const };
       }
       const db = await adminDb();
-      await db.from("ad_events").insert({ campaign_id: data.campaignId, viewer_id: me, kind: data.kind });
+      await db
+        .from("ad_events")
+        .insert({ campaign_id: data.campaignId, viewer_id: me, kind: data.kind });
       const { data: existing } = await db
         .from("ad_exposures")
         .select("impression_count, interaction_count")
@@ -320,8 +376,7 @@ export const logAdEvent = createServerFn({ method: "POST" })
           viewer_id: me,
           last_shown_at: new Date().toISOString(),
           impression_count: prev.impression_count + (isImpression ? 1 : 0),
-          interaction_count:
-            prev.interaction_count + (isImpression || isHide ? 0 : 1),
+          interaction_count: prev.interaction_count + (isImpression || isHide ? 0 : 1),
           hidden: isHide ? true : false,
         },
         { onConflict: "campaign_id, viewer_id" },

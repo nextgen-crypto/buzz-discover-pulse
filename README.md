@@ -42,13 +42,13 @@ npm run build          # must stay green before every commit
 
 ### Environment
 
-| Variable | Where | Purpose |
-|---|---|---|
-| `VITE_SUPABASE_URL` / `SUPABASE_URL` | client + server | Supabase project URL |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_PUBLISHABLE_KEY` | client + server | Anon/publishable key |
-| `SUPABASE_SERVICE_ROLE_KEY` | server only, gitignored | Bypasses RLS — never use a `VITE_` prefix, never commit |
-| `VITE_ADMIN_EMAILS` | client | Comma-separated allowlist that unlocks `/admin` |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | server, optional | Shared cache across instances (falls back to in-process memory) |
+| Variable                                                     | Where                   | Purpose                                                         |
+| ------------------------------------------------------------ | ----------------------- | --------------------------------------------------------------- |
+| `VITE_SUPABASE_URL` / `SUPABASE_URL`                         | client + server         | Supabase project URL                                            |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_PUBLISHABLE_KEY` | client + server         | Anon/publishable key                                            |
+| `SUPABASE_SERVICE_ROLE_KEY`                                  | server only, gitignored | Bypasses RLS — never use a `VITE_` prefix, never commit         |
+| `VITE_ADMIN_EMAILS`                                          | client                  | Comma-separated allowlist that unlocks `/admin`                 |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`        | server, optional        | Shared cache across instances (falls back to in-process memory) |
 
 ## Database
 
@@ -64,6 +64,9 @@ Run migrations **in order** in the Supabase dashboard → SQL editor
 5. `20260921170500_part5_ads.sql` — ad campaigns, events, exposures, payments
 6. `20260921170600_part6_content.sql` — pin, thumbnails, remix/duet gates
 7. `20260921170700_part7_video.sql` — `video_url` for video posts
+8. `20260925120000_posting_integrity.sql` — private storage/RLS, post settings,
+   follow-notification repair, cron-backed scheduled publishing, 24-hour stories,
+   and owner recovery visibility
 
 Schema conventions: relational tables + JSONB `metadata` for schemaless
 fields, denormalized counters maintained by triggers, cursor/keyset
@@ -113,12 +116,12 @@ mode); remove it to bundle local assets for offline testing.
 
 ## Scripts
 
-| Command | Purpose |
-|---|---|
-| `npm run dev` | Local dev server |
-| `npm run build` | Production build (keep green) |
-| `npm run preview` | Preview the build |
-| `npm run lint` / `npm run format` | ESLint / Prettier |
+| Command                           | Purpose                       |
+| --------------------------------- | ----------------------------- |
+| `npm run dev`                     | Local dev server              |
+| `npm run build`                   | Production build (keep green) |
+| `npm run preview`                 | Preview the build             |
+| `npm run lint` / `npm run format` | ESLint / Prettier             |
 
 ## Working agreements
 

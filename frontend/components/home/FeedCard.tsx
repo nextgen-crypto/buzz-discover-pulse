@@ -34,6 +34,7 @@ import { usePostLikes } from "@/frontend/hooks/usePostLikes";
 import { useSavedPosts, useToggleSave } from "@/frontend/hooks/useSavedPosts";
 import type { FeedEvent } from "@/frontend/hooks/useEventTracker";
 import { cn } from "@/lib/utils";
+import { visibleHashtags } from "@/frontend/lib/hashtags";
 
 const compact = new Intl.NumberFormat("en", { notation: "compact" });
 const DOUBLE_TAP_MS = 280;
@@ -107,8 +108,8 @@ export function FeedCard({
   // Real likes for Supabase posts (fires author notifications via trigger);
   // seed items stay local.
   const [localPostLiked, setLocalPostLiked] = useState(false);
-  const likeReal = isUuid(post.id) && userId !== null;
   const postLike = usePostLikes(isUuid(post.id) ? post.id : null, userId);
+  const likeReal = isUuid(post.id) && userId !== null && postLike.remote;
   const liked = likeReal ? postLike.liked : localPostLiked;
   const likeCount = likeReal ? postLike.count : post.metrics.likes + (localPostLiked ? 1 : 0);
 
@@ -158,7 +159,7 @@ export function FeedCard({
   }
 
   // Real saves only work for Supabase posts + signed-in viewers; seed items fall back local.
-  const realCapable = isUuid(post.id) && userId !== null;
+  const realCapable = isUuid(post.id) && userId !== null && toggleSave.remote;
   const realSaved = realCapable && savedPosts.some((p) => p.id === post.id);
   const saved = realCapable ? realSaved : localSaved;
 
@@ -180,6 +181,9 @@ export function FeedCard({
 
   const image = post.media.find((m) => m.kind === "image");
   const aspect = image ? image.width / image.height : 1;
+  const commentsEnabled = post.commentsEnabled !== false;
+  const sharingEnabled = post.allowSharing !== false;
+  const appendedHashtags = visibleHashtags(post.caption, post.hashtags);
 
   function likeWithBurst() {
     if (!requireAuth()) return;
@@ -365,8 +369,8 @@ export function FeedCard({
 
       <p className="break-words px-3 py-3 text-[15px] leading-snug text-foreground sm:px-5">
         {post.caption}
-        {post.hashtags.length > 0 && (
-          <span className="text-brand"> {post.hashtags.map((h) => `#${h}`).join(" ")}</span>
+        {appendedHashtags.length > 0 && (
+          <span className="text-brand"> {appendedHashtags.map((h) => `#${h}`).join(" ")}</span>
         )}
       </p>
 
@@ -472,28 +476,32 @@ export function FeedCard({
           />
           <span className="text-sm text-foreground">{compact.format(likeCount)}</span>
         </button>
-        <button
-          aria-label="Comment"
-          onClick={() => {
-            if (!requireAuth()) return;
-            setCommentsOpen(true);
-          }}
-          className="press flex items-center gap-2"
-        >
-          <MessageCircle className="size-5 text-foreground" />
-          <span className="text-sm text-foreground">{compact.format(totalComments)}</span>
-        </button>
-        <button
-          aria-label="Share"
-          onClick={() => {
-            setSharing(true);
-            track?.("video_share", post.id, { authorId: author.id });
-          }}
-          className="flex items-center gap-2"
-        >
-          <Share2 className="size-5 text-foreground" />
-          <span className="text-sm text-foreground">{compact.format(post.metrics.shares)}</span>
-        </button>
+        {commentsEnabled && (
+          <button
+            aria-label="Comment"
+            onClick={() => {
+              if (!requireAuth()) return;
+              setCommentsOpen(true);
+            }}
+            className="press flex items-center gap-2"
+          >
+            <MessageCircle className="size-5 text-foreground" />
+            <span className="text-sm text-foreground">{compact.format(totalComments)}</span>
+          </button>
+        )}
+        {sharingEnabled && (
+          <button
+            aria-label="Share"
+            onClick={() => {
+              setSharing(true);
+              track?.("video_share", post.id, { authorId: author.id });
+            }}
+            className="flex items-center gap-2"
+          >
+            <Share2 className="size-5 text-foreground" />
+            <span className="text-sm text-foreground">{compact.format(post.metrics.shares)}</span>
+          </button>
+        )}
         <button
           key={saved ? "saved" : "unsaved"}
           onClick={toggleSavePost}
@@ -510,29 +518,31 @@ export function FeedCard({
         </button>
       </div>
 
-      <div className="px-3 pb-3 sm:px-5">
-        <button
-          onClick={() => {
-            if (!requireAuth()) return;
-            setCommentsOpen(true);
-          }}
-          aria-label="Open comments"
-          className="flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-left hover:bg-secondary"
-        >
-          <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="grid size-6 shrink-0 place-items-center rounded-full bg-secondary text-[10px] font-bold text-foreground">
-              {preview.user.slice(0, 1).toUpperCase()}
+      {commentsEnabled && (
+        <div className="px-3 pb-3 sm:px-5">
+          <button
+            onClick={() => {
+              if (!requireAuth()) return;
+              setCommentsOpen(true);
+            }}
+            aria-label="Open comments"
+            className="flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-left hover:bg-secondary"
+          >
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="grid size-6 shrink-0 place-items-center rounded-full bg-secondary text-[10px] font-bold text-foreground">
+                {preview.user.slice(0, 1).toUpperCase()}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
+                <span className="font-semibold">{preview.user}</span>{" "}
+                <span className="text-muted-foreground">{preview.text}</span>
+              </span>
             </span>
-            <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
-              <span className="font-semibold">{preview.user}</span>{" "}
-              <span className="text-muted-foreground">{preview.text}</span>
+            <span className="shrink-0 text-xs font-semibold text-muted-foreground">
+              {compact.format(totalComments)}
             </span>
-          </span>
-          <span className="shrink-0 text-xs font-semibold text-muted-foreground">
-            {compact.format(totalComments)}
-          </span>
-        </button>
-      </div>
+          </button>
+        </div>
+      )}
 
       <ShareSheet
         open={sharing}

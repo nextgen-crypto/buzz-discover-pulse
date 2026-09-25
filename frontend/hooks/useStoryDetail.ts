@@ -10,6 +10,8 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useSharedRealtimeChannel } from "@/frontend/hooks/realtime";
 import { writeErrorMessage } from "@/frontend/lib/writeError";
+import { useSession } from "@/frontend/hooks/useSession";
+import { hydratePostMediaList } from "@/frontend/lib/postMedia";
 import type { NewsStory } from "@/frontend/hooks/useNewsStories";
 
 export type StoryTab = "Top" | "Latest";
@@ -48,7 +50,9 @@ interface PostRow {
   id: string;
   caption: string;
   image_url: string | null;
+  image_path?: string;
   video_url?: string | null;
+  video_path?: string;
   hashtags: string[];
   created_at: string;
   comments_count: number;
@@ -78,7 +82,8 @@ async function hydrate(rows: PostRow[]): Promise<StoryPost[]> {
       isPrivate: p.is_private === true,
     });
   }
-  return rows.map((r) => ({
+  const hydratedRows = await hydratePostMediaList(rows);
+  return hydratedRows.map((r) => ({
     postId: r.id,
     caption: r.caption ?? "",
     imageUrl: r.image_url,
@@ -93,7 +98,10 @@ async function hydrate(rows: PostRow[]): Promise<StoryPost[]> {
 async function fetchViews(ids: string[]): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   if (ids.length === 0) return map;
-  const { data } = await supabase.from("post_stats").select("post_id, impressions").in("post_id", ids);
+  const { data } = await supabase
+    .from("post_stats")
+    .select("post_id, impressions")
+    .in("post_id", ids);
   for (const row of (data ?? []) as { post_id: string; impressions: number }[]) {
     map.set(row.post_id, row.impressions ?? 0);
   }
@@ -119,7 +127,9 @@ async function fetchRealPage(
   } else {
     query = query.order("added_at", { ascending: false }).order("post_id");
     if (cursor) {
-      query = query.or(`added_at.lt.${cursor.added},and(added_at.eq.${cursor.added},post_id.gt.${cursor.id})`);
+      query = query.or(
+        `added_at.lt.${cursor.added},and(added_at.eq.${cursor.added},post_id.gt.${cursor.id})`,
+      );
     }
   }
   const { data: links, error } = await query.limit(PAGE_SIZE + 1);
@@ -128,12 +138,25 @@ async function fetchRealPage(
   const hasMore = page.length > PAGE_SIZE;
   const slice = hasMore ? page.slice(0, PAGE_SIZE) : page;
   if (slice.length === 0) return { items: [], next: null };
-  const { data: posts, error: postError } = await supabase
+  const postIds = slice.map((link) => link.post_id);
+  const current = await supabase
     .from("posts")
-    .select("id, caption, image_url, video_url, hashtags, created_at, comments_count, author_id")
-    .in("id", slice.map((l) => l.post_id))
+    .select(
+      "id, caption, image_url, image_path, video_url, video_path, hashtags, created_at, comments_count, author_id",
+    )
+    .in("id", postIds)
     .eq("status", "published");
-  if (postError) throw postError;
+  const compatible = current.error
+    ? await supabase
+        .from("posts")
+        .select(
+          "id, caption, image_url, video_url, hashtags, created_at, comments_count, author_id",
+        )
+        .in("id", postIds)
+        .eq("status", "published")
+    : current;
+  if (compatible.error) throw compatible.error;
+  const posts = compatible.data;
   const byId = new Map(((posts ?? []) as PostRow[]).map((p) => [p.id, p]));
   const ordered = slice.map((l) => byId.get(l.post_id)).filter((p): p is PostRow => Boolean(p));
   const items = await hydrate(ordered);
@@ -149,20 +172,31 @@ async function fetchTagPage(
   tab: StoryTab,
   cursor: string | null,
 ): Promise<{ items: StoryPost[]; next: string | null }> {
-  let query = supabase
-    .from("posts")
-    .select("id, caption, image_url, video_url, hashtags, created_at, comments_count, author_id")
-    .eq("status", "published")
-    .contains("hashtags", [tag]);
-  if (tab === "Top") {
-    query = query.order("comments_count", { ascending: false }).order("id");
-  } else {
-    query = query.order("created_at", { ascending: false });
-    if (cursor) query = query.lt("created_at", cursor);
-  }
-  const { data, error } = await query.limit(PAGE_SIZE + 1);
-  if (error) throw error;
-  const rows = (data ?? []) as PostRow[];
+  const runQuery = (select: string) => {
+    let query = supabase
+      .from("posts")
+      .select(select)
+      .eq("status", "published")
+      .contains("hashtags", [tag]);
+    if (tab === "Top") {
+      query = query.order("comments_count", { ascending: false }).order("id");
+    } else {
+      query = query.order("created_at", { ascending: false });
+      if (cursor) query = query.lt("created_at", cursor);
+    }
+    return query.limit(PAGE_SIZE + 1);
+  };
+  const current = await runQuery(
+    "id, caption, image_url, image_path, video_url, video_path, hashtags, created_at, comments_count, author_id",
+  );
+  const compatible = current.error
+    ? await runQuery(
+        "id, caption, image_url, video_url, hashtags, created_at, comments_count, author_id",
+      )
+    : current;
+  if (compatible.error) throw compatible.error;
+  const data = compatible.data;
+  const rows = (data ?? []) as unknown as PostRow[];
   const hasMore = rows.length > PAGE_SIZE;
   const slice = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
   return {
@@ -200,7 +234,9 @@ export const storyQueryOptions = (storyId: string) =>
       }
       const { data, error } = await supabase
         .from("news_stories")
-        .select("id, headline, summary, summary_short, category, state, cover_image_url, created_at")
+        .select(
+          "id, headline, summary, summary_short, category, state, cover_image_url, created_at",
+        )
         .eq("id", storyId)
         .maybeSingle();
       if (error) throw error;
@@ -231,8 +267,9 @@ export function useStory(storyId: string) {
 
 /** Keyset-paginated story posts. Never auto-inserts — see useStoryLiveCount. */
 export function useStoryPosts(storyId: string, tab: StoryTab) {
+  const { user } = useSession();
   return useInfiniteQuery({
-    queryKey: ["story-posts", storyId, tab],
+    queryKey: ["story-posts", user?.id ?? "anonymous", storyId, tab],
     initialPageParam: null as { score: number; added: string; id: string } | string | null,
     staleTime: 30_000,
     retry: false,
@@ -240,7 +277,11 @@ export function useStoryPosts(storyId: string, tab: StoryTab) {
       if (storyId.startsWith("tag:")) {
         return fetchTagPage(storyId.slice(4), tab, pageParam as string | null);
       }
-      return fetchRealPage(storyId, tab, pageParam as { score: number; added: string; id: string } | null);
+      return fetchRealPage(
+        storyId,
+        tab,
+        pageParam as { score: number; added: string; id: string } | null,
+      );
     },
     getNextPageParam: (last) => last.next,
   });
@@ -271,8 +312,9 @@ export function useStoryLiveCount(storyId: string, enabled: boolean) {
 
 /** Curated relevant people; synthetic stories use the tag's top authors. */
 export function useRelevantPeople(storyId: string) {
+  const { user } = useSession();
   return useQuery({
-    queryKey: ["story-people", storyId],
+    queryKey: ["story-people", user?.id ?? "anonymous", storyId],
     staleTime: 60_000,
     retry: false,
     queryFn: async (): Promise<RelevantPerson[]> => {
@@ -290,7 +332,10 @@ export function useRelevantPeople(storyId: string) {
         for (const r of (data ?? []) as { author_id: string }[]) {
           counts.set(r.author_id, (counts.get(r.author_id) ?? 0) + 1);
         }
-        const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
+        const top = [...counts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([id]) => id);
         if (top.length === 0) return [];
         const { data: profiles, error: pError } = await supabase
           .from("profiles")
@@ -327,15 +372,17 @@ export function useRelevantPeople(storyId: string) {
       return ids.flatMap((id) => {
         const p = byId.get(id);
         return p
-          ? [{
-              id,
-              username: String(p.username ?? "?"),
-              displayName: String(p.display_name ?? "?"),
-              avatarUrl: (p.avatar_url as string | null) ?? null,
-              verified: p.verified === true,
-              isPrivate: p.is_private === true,
-              bio: String(p.bio ?? ""),
-            }]
+          ? [
+              {
+                id,
+                username: String(p.username ?? "?"),
+                displayName: String(p.display_name ?? "?"),
+                avatarUrl: (p.avatar_url as string | null) ?? null,
+                verified: p.verified === true,
+                isPrivate: p.is_private === true,
+                bio: String(p.bio ?? ""),
+              },
+            ]
           : [];
       });
     },
@@ -482,7 +529,12 @@ export function useMyStorySaves(userId: string | null) {
           .select("id, headline, category, created_at")
           .in("id", ids);
         if (sError) throw sError;
-        return (stories ?? []) as { id: string; headline: string; category: string; created_at: string }[];
+        return (stories ?? []) as {
+          id: string;
+          headline: string;
+          category: string;
+          created_at: string;
+        }[];
       } catch {
         return [];
       }

@@ -51,6 +51,9 @@ export function useFollowRequests(userId: string | null) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["follow-requests", userId] });
       void queryClient.invalidateQueries({ queryKey: ["my-stats", userId] });
+      void queryClient.invalidateQueries({ queryKey: ["home"] });
+      void queryClient.invalidateQueries({ queryKey: ["profile-posts"] });
+      void queryClient.invalidateQueries({ queryKey: ["follow-list"] });
     },
     onError: (e) => {
       toast.error(writeErrorMessage(e, "Could not respond. Try again."));
@@ -164,6 +167,10 @@ export function useBlockState(viewerId: string | null, profileId: string | null)
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["block-state", viewerId, profileId] });
+      void queryClient.invalidateQueries({ queryKey: ["home"] });
+      void queryClient.invalidateQueries({ queryKey: ["profile-posts"] });
+      void queryClient.invalidateQueries({ queryKey: ["profile-by-username"] });
+      void queryClient.invalidateQueries({ queryKey: ["follow-list"] });
     },
     onError: (e) => {
       toast.error(writeErrorMessage(e, "Could not update block. Try again."));

@@ -32,11 +32,16 @@ export const TTL = {
 
 /** Canonical key builders. Keep every key namespaced and prefix-invalidatable. */
 export const cacheKeys = {
-  feed: (userId: string, cursor: string) => `feed:user:${userId}:${cursor}`,
+  feed: (userId: string, cursor: string, profileKey = "neutral") =>
+    `feed:user:${userId}:${profileKey}:${cursor}`,
   feedAll: (userId: string) => `feed:user:${userId}:`,
-  candidates: "candidates:global",
+  feedAllUsers: "feed:user:",
+  candidates: (viewerId: string) => `candidates:viewer:${viewerId}`,
+  candidatesAll: "candidates:viewer:",
   post: (postId: string) => `post:${postId}`,
   profile: (userId: string) => `profile:${userId}`,
+  stories: (viewerId: string) => `stories:viewer:${viewerId}`,
+  storiesAll: "stories:viewer:",
   trending: (region: string) => `trending:${region}`,
   news: (category: string) => `news:${category}`,
   explore: (category: string, cursor: string) => `explore:${category}:${cursor}`,
@@ -214,7 +219,9 @@ export async function cacheAside<T>(
 export const invalidate = {
   post: (postId: string) => client().del(cacheKeys.post(postId)),
   profile: (userId: string) => client().del(cacheKeys.profile(userId)),
+  stories: () => client().delPrefix(cacheKeys.storiesAll),
   feed: (userId: string) => client().delPrefix(cacheKeys.feedAll(userId)),
-  candidates: () => client().del(cacheKeys.candidates),
+  feedAll: () => client().delPrefix(cacheKeys.feedAllUsers),
+  candidates: () => client().delPrefix(cacheKeys.candidatesAll),
   trending: (region: string) => client().del(cacheKeys.trending(region)),
 };

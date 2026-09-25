@@ -36,7 +36,7 @@ function Tab({
   );
 }
 
-/** Single global creation entry point. Contextual surfaces dispatch `open-create`. */
+/** Hosts the global creation engine for contextual surfaces that dispatch `open-create`. */
 export function BottomNav() {
   const [createOpen, setCreateOpen] = useState(false);
   const [initialKind, setInitialKind] = useState<CreateKind | null>(null);

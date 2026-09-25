@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { invalidateHomeCache } from "@/backend/api/home.functions";
+import { fetchPostingCapabilities } from "@/backend/api/posts.functions";
 import {
   AtSign,
   Camera,
@@ -26,14 +27,20 @@ import {
   X,
 } from "lucide-react";
 import { Sheet } from "@/frontend/components/overlays/Sheet";
-import { uploadAndSign } from "@/frontend/lib/storageUpload";
+import {
+  removeStoredObjects,
+  uploadAndSign,
+  uploadStoredObject,
+} from "@/frontend/lib/storageUpload";
 import {
   IMAGE_MAX_BYTES,
   VIDEO_MAX_BYTES,
   bakeOrOriginal,
+  extOf,
   sizeError,
   videoPreviewable,
 } from "@/frontend/lib/mediaFormat";
+import { extractHashtags } from "@/frontend/lib/hashtags";
 import { BeautyCameraSheet } from "@/frontend/components/camera/BeautyCameraSheet";
 import { CropSheet } from "@/frontend/components/create/CropSheet";
 import {
@@ -47,11 +54,36 @@ import type { CreateKind } from "@/frontend/components/home/nav-items";
 import { createActions } from "@/frontend/components/home/nav-items";
 
 const TEN_YEARS = 60 * 60 * 24 * 365 * 10;
-const DRAFT_KEY = "wizz:create:drafts";
+const DRAFT_KEY_PREFIX = "wizz:create:drafts";
+
+function draftKey(userId: string | null): string {
+  return `${DRAFT_KEY_PREFIX}:${userId ?? "anonymous"}`;
+}
 const CATEGORIES = ["For You", "Trending", "Sports", "Music", "Tech", "Style", "Food", "Travel"];
 const AUDIENCES = ["Public", "Followers", "Private"] as const;
 const SPEEDS = [0.5, 1, 1.5, 2] as const;
 const TEXT_BACKGROUNDS = ["#7c3aed", "#0f766e", "#1d4ed8", "#b45309", "#be123c", "#111827"];
+const STORY_TTL_MS = 24 * 60 * 60 * 1000;
+
+type PhotoAdjustments = {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  temperature: number;
+};
+
+function adjustmentFilterCss(adjust: PhotoAdjustments): string {
+  return [
+    adjust.brightness ? `brightness(${(1 + adjust.brightness / 100).toFixed(2)})` : "",
+    adjust.contrast ? `contrast(${(1 + adjust.contrast / 100).toFixed(2)})` : "",
+    adjust.saturation ? `saturate(${(1 + adjust.saturation / 100).toFixed(2)})` : "",
+    adjust.temperature > 0 ? `sepia(${(adjust.temperature / 250).toFixed(2)})` : "",
+    adjust.temperature < 0 ? `hue-rotate(${(adjust.temperature / 2).toFixed(0)}deg)` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 export const TRACKS = [
   {
     id: "t1",
@@ -106,20 +138,37 @@ type Step =
 interface Draft {
   id: string;
   kind: Exclude<CreateKind, "more">;
+  mediaHint: "none" | "photo" | "video" | "text";
   caption: string;
   location: string;
   tags: string;
   category: string;
   audience: (typeof AUDIENCES)[number];
+  allowComments: boolean;
+  allowSharing: boolean;
+  schedule: string;
+  textBackground: string;
+  storyOverlays: string[];
   createdAt: string;
 }
 
-function loadDrafts(): Draft[] {
-  try {
-    return JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "[]") as Draft[];
-  } catch {
-    return [];
-  }
+function loadDrafts(userId: string | null): Draft[] {
+  const read = (key: string): Draft[] => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+      return Array.isArray(parsed) ? (parsed as Draft[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const own = read(draftKey(userId));
+  if (!userId) return own;
+  // Carry drafts created before sign-in into the first authenticated session.
+  const anonymous = read(draftKey(null));
+  return [...own, ...anonymous.filter((draft) => !own.some((item) => item.id === draft.id))].slice(
+    0,
+    20,
+  );
 }
 
 const TITLES: Record<Step, string> = {
@@ -145,9 +194,10 @@ export function CreationEngine({
   initial: CreateKind | null;
   onClose: () => void;
 }) {
-  const { user } = useSession();
+  const { user, loading: sessionLoading } = useSession();
   const queryClient = useQueryClient();
   const bustCache = useServerFn(invalidateHomeCache);
+  const inspectPostingSchema = useServerFn(fetchPostingCapabilities);
   const fileRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
 
@@ -189,6 +239,7 @@ export function CreationEngine({
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [draftRevision, setDraftRevision] = useState(0);
 
   // live
   const [liveTitle, setLiveTitle] = useState("");
@@ -202,9 +253,33 @@ export function CreationEngine({
 
   useEffect(() => {
     if (!open) return;
+    clearPhoto();
+    clearVideo();
+    setCamera(null);
+    setCropping(false);
+    setTextBody("");
+    setTextBg(TEXT_BACKGROUNDS[0]!);
+    setStoryOverlays([]);
+    setCaption("");
+    setLocation("");
+    setTags("");
+    setCategory(CATEGORIES[0] ?? "For You");
+    setAudience("Public");
+    setAllowComments(true);
+    setAllowSharing(true);
+    setSchedule("");
+    setLiveTitle("");
+    setLiveCategory(CATEGORIES[1] ?? "Trending");
+    setLiveMic(true);
+    setLiveBeauty(40);
+    setLiveComments(true);
+    setViewers(12);
+    setLiveChat(["Welcome to the stream!"]);
+    setLiveReacts(0);
+    setProgress(0);
+    setError(null);
     setStep(initial && initial !== "more" ? mapKind(initial) : "hub");
     if (initial && initial !== "more") setKind(initial);
-    setError(null);
     try {
       const pending = localStorage.getItem("wizz:pending-track");
       if (pending && TRACKS.some((t) => t.id === pending)) {
@@ -216,6 +291,12 @@ export function CreationEngine({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !initial || initial === "more") return;
+    setKind(initial);
+    setStep(mapKind(initial));
+  }, [initial, open]);
 
   useEffect(() => {
     if (step !== "live-room") return;
@@ -250,6 +331,19 @@ export function CreationEngine({
   }
 
   function pick(kindNext: Exclude<CreateKind, "more">) {
+    if (kindNext !== kind) {
+      clearPhoto();
+      clearVideo();
+      setCaption("");
+      setTextBody("");
+      setLocation("");
+      setTags("");
+      setSchedule("");
+      setAudience("Public");
+      setAllowComments(true);
+      setAllowSharing(true);
+      setStoryOverlays([]);
+    }
     setKind(kindNext);
     setError(null);
     setStep(mapKind(kindNext));
@@ -278,20 +372,34 @@ export function CreationEngine({
     setTrim([0, 100]);
   }
 
+  function clearPhoto() {
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+    setPhoto(null);
+    setPhotoUrl(null);
+    setPresetId("none");
+    setIntensity(100);
+    setAdjust({ brightness: 0, contrast: 0, saturation: 0, temperature: 0 });
+  }
+
+  function clearVideo() {
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoFile(null);
+    setVideoUrl(null);
+    setTrim([0, 100]);
+    setSpeed(1);
+    setMuted(false);
+    setTrackId(null);
+  }
+
   const preset = filterPresets.find((p) => p.id === presetId) ?? filterPresets[0]!;
-  const photoFilter = useMemo(() => {
-    const base = filterCss(preset.settings, preset.extra, intensity / 100);
-    const extra = [
-      adjust.brightness ? `brightness(${(1 + adjust.brightness / 100).toFixed(2)})` : "",
-      adjust.contrast ? `contrast(${(1 + adjust.contrast / 100).toFixed(2)})` : "",
-      adjust.saturation ? `saturate(${(1 + adjust.saturation / 100).toFixed(2)})` : "",
-      adjust.temperature > 0 ? `sepia(${(adjust.temperature / 250).toFixed(2)})` : "",
-      adjust.temperature < 0 ? `hue-rotate(${(adjust.temperature / 2).toFixed(0)}deg)` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    return [base, extra].filter(Boolean).join(" ");
-  }, [preset, intensity, adjust]);
+  const photoAdjustmentFilter = useMemo(() => adjustmentFilterCss(adjust), [adjust]);
+  const photoFilter = useMemo(
+    () =>
+      [filterCss(preset.settings, preset.extra, intensity / 100), photoAdjustmentFilter]
+        .filter(Boolean)
+        .join(" "),
+    [preset, intensity, photoAdjustmentFilter],
+  );
 
   function goComposer() {
     if (kind === "text" && !textBody.trim() && !caption.trim()) {
@@ -306,28 +414,59 @@ export function CreationEngine({
       setError("Record or upload a clip first.");
       return;
     }
+    if (kind === "story" && !photo && !videoFile && !textBody.trim()) {
+      setError("Add a photo, video, or text to your story first.");
+      return;
+    }
     setError(null);
     setCaption((c) => c || textBody.trim());
     setStep("composer");
   }
 
-  function saveDraft() {
-    const drafts = loadDrafts();
+  function saveDraft(): boolean {
+    const drafts = loadDrafts(user?.id ?? null);
     const draft: Draft = {
       id: `d-${Date.now()}`,
       kind,
+      mediaHint:
+        kind === "text" || (kind === "story" && textBody.trim() && !photo && !videoFile)
+          ? "text"
+          : photo
+            ? "photo"
+            : videoFile
+              ? "video"
+              : "none",
       caption: caption || textBody,
       location,
       tags,
       category,
       audience,
+      allowComments,
+      allowSharing,
+      schedule,
+      textBackground: textBg,
+      storyOverlays,
       createdAt: new Date().toISOString(),
     };
-    localStorage.setItem(DRAFT_KEY, JSON.stringify([draft, ...drafts].slice(0, 20)));
-    onClose();
+    try {
+      localStorage.setItem(
+        draftKey(user?.id ?? null),
+        JSON.stringify([draft, ...drafts].slice(0, 20)),
+      );
+      setDraftRevision((revision) => revision + 1);
+      onClose();
+      return true;
+    } catch {
+      setError("This browser could not save the draft.");
+      return false;
+    }
   }
 
   async function publish() {
+    if (sessionLoading) {
+      setError("Restoring your session. Try again in a moment.");
+      return;
+    }
     if (!user) {
       setError("Sign in to publish.");
       return;
@@ -337,75 +476,172 @@ export function CreationEngine({
       setError("Write a caption first.");
       return;
     }
+
+    const requestedSchedule = kind === "story" ? "" : schedule;
+    const scheduledAt = requestedSchedule ? new Date(requestedSchedule) : null;
+    if (
+      scheduledAt &&
+      (!Number.isFinite(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now())
+    ) {
+      setError("Choose a schedule time in the future.");
+      return;
+    }
+
     setBusy(true);
     setError(null);
     setStep("publishing");
     setProgress(8);
+    const uploadedPaths: string[] = [];
+    let postCommitted = false;
     try {
+      const capabilities = await inspectPostingSchema();
+      if (videoFile && !capabilities.video) {
+        throw new Error("Video posts need the latest media migration in Supabase.");
+      }
+      if ((audience !== "Public" || !allowComments) && !capabilities.settings) {
+        throw new Error("Post privacy settings need the latest SQL migration.");
+      }
+      if (!allowSharing && !capabilities.full) {
+        throw new Error("Sharing controls need the latest posting-integrity migration.");
+      }
+      if (scheduledAt && !capabilities.full) {
+        throw new Error("Scheduling needs the latest posting-integrity migration.");
+      }
+      if (kind === "story" && !capabilities.full) {
+        throw new Error("24-hour stories need the latest posting-integrity migration.");
+      }
+
+      setProgress(12);
+      const stamp = Date.now();
+      let imagePath: string | null = null;
+      let videoPath: string | null = null;
       let imageUrl: string | null = null;
       let videoUrl: string | null = null;
+
       if (photo && (kind === "photo" || kind === "story")) {
-        // GIFs/SVGs and undecodable files upload as-is (filters need canvas).
-        const baked = await bakeOrOriginal(photo, (f) =>
-          applyFilterToFile(f, preset.settings, preset.extra, intensity / 100),
+        const baked = await bakeOrOriginal(photo, (file) =>
+          applyFilterToFile(
+            file,
+            preset.settings,
+            [preset.extra, photoAdjustmentFilter].filter(Boolean).join(" ") || undefined,
+            intensity / 100,
+          ),
         );
+        const bakedFile = baked instanceof File ? baked : photo;
+        const imageExtension = extOf(bakedFile) || (baked.type === "image/jpeg" ? "jpg" : "bin");
+        imagePath = `${user.id}/post-${stamp}.${imageExtension}`;
+        uploadedPaths.push(imagePath);
         setProgress(35);
-        imageUrl = await uploadAndSign("post-images", `${user.id}/post-${Date.now()}.jpg`, baked, {
-          width: 1280,
-        });
+        if (capabilities.media) {
+          await uploadStoredObject("post-images", imagePath, baked, {
+            contentType: baked.type || photo.type || "image/jpeg",
+          });
+        } else {
+          imageUrl = await uploadAndSign("post-images", imagePath, baked, {
+            contentType: baked.type || photo.type || "image/jpeg",
+            width: 1280,
+          });
+        }
         setProgress(65);
       }
-      if (videoFile && kind === "video") {
+
+      if (videoFile && (kind === "video" || kind === "story")) {
         setProgress(35);
-        const ext = (videoFile.name.split(".").pop() ?? "mp4").slice(0, 8).toLowerCase();
-        const path = `${user.id}/video-${Date.now()}.${ext}`;
-        const up = await supabase.storage.from("post-images").upload(path, videoFile, {
-          contentType: videoFile.type || "video/mp4",
-        });
-        if (up.error) throw up.error;
+        const extension = extOf(videoFile) || "mp4";
+        videoPath = `${user.id}/video-${stamp}.${extension}`;
+        uploadedPaths.push(videoPath);
+        if (capabilities.media) {
+          await uploadStoredObject("post-images", videoPath, videoFile, {
+            contentType: videoFile.type || `video/${extension}`,
+          });
+        } else {
+          const upload = await supabase.storage.from("post-images").upload(videoPath, videoFile, {
+            contentType: videoFile.type || `video/${extension}`,
+          });
+          if (upload.error) throw upload.error;
+          const signed = await supabase.storage
+            .from("post-images")
+            .createSignedUrl(videoPath, TEN_YEARS);
+          if (signed.error) throw signed.error;
+          videoUrl = signed.data.signedUrl;
+        }
         setProgress(65);
-        const signed = await supabase.storage.from("post-images").createSignedUrl(path, TEN_YEARS);
-        if (signed.error) throw signed.error;
-        videoUrl = signed.data.signedUrl;
       }
+
       setProgress(82);
-      const hashtags = [
-        ...new Set(
-          `${text} ${tags}`
-            .split(/[\s,]+/)
-            .map((t) => t.trim().replace(/^#/, "").toLowerCase())
-            .filter((t) => t && /[a-z0-9]/.test(t))
-            .slice(0, 8),
-        ),
-      ].filter((t) => text.toLowerCase().includes(`#${t}`) || tags.toLowerCase().includes(t));
-      const { error: insertError } = await supabase.from("posts").insert({
+      const hashtags = extractHashtags(text, tags);
+      const basePost = {
         author_id: user.id,
-        caption: schedule ? `${text}\n\n(Scheduled ${schedule})` : text,
-        image_url: imageUrl,
+        caption: text,
+        image_url: capabilities.media ? null : imageUrl,
         hashtags,
         location: location.trim() || null,
         category: kind === "story" ? "For You" : category,
+        ...(capabilities.media
+          ? {
+              image_path: imagePath ?? "",
+              ...(videoPath ? { video_path: videoPath, video_url: "" } : {}),
+            }
+          : videoUrl
+            ? { video_url: videoUrl }
+            : {}),
+        ...(capabilities.settings
+          ? {
+              visibility: audience.toLowerCase(),
+              comments_enabled: allowComments,
+            }
+          : {}),
         ...(videoUrl ? { video_url: videoUrl } : {}),
-      });
+      };
+      const post = capabilities.full
+        ? {
+            ...basePost,
+            status: scheduledAt ? "scheduled" : "published",
+            allow_sharing: allowSharing,
+            scheduled_at: scheduledAt?.toISOString() ?? null,
+            content_kind: kind === "story" ? "story" : "post",
+            story_expires_at:
+              kind === "story" ? new Date(Date.now() + STORY_TTL_MS).toISOString() : null,
+            story_overlays: kind === "story" ? storyOverlays : [],
+            story_background: kind === "story" ? textBg : null,
+          }
+        : basePost;
+
+      const { error: insertError } = await supabase.from("posts").insert(post);
       if (insertError) {
-        if (videoUrl && insertError.message.includes("video_url")) {
-          throw new Error("Video posts need part7 SQL (video_url) — run it in Supabase first.");
+        if ((videoUrl || videoPath) && /video_(?:url|path)/.test(insertError.message)) {
+          throw new Error("Video posts need the latest media migration in Supabase.");
+        }
+        if (insertError.message.includes("column") || insertError.code === "PGRST204") {
+          throw new Error(
+            "This post needs the latest posting-integrity migration before it can be saved safely.",
+          );
         }
         throw insertError;
       }
+
+      postCommitted = true;
       setProgress(100);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["my-posts"] }),
-        queryClient.invalidateQueries({ queryKey: ["my-stats"] }),
-      ]);
-      // Bust server caches so the post appears in feeds instantly.
+      // Bust server caches first, then refetch mounted home/profile queries.
+      // A server-cache outage must not skip this browser's invalidations: doing
+      // so would leave a successfully committed post looking unpublished.
       try {
         await bustCache();
       } catch {
-        // TTLs expire it anyway
+        // Server TTLs remain the fallback; client queries still refresh below.
       }
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: ["home"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-posts"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-stats"] }),
+        queryClient.invalidateQueries({ queryKey: ["profile-posts"] }),
+        queryClient.invalidateQueries({ queryKey: ["profile-stats"] }),
+      ]);
       setStep("success");
     } catch (e) {
+      if (!postCommitted) {
+        await removeStoredObjects("post-images", uploadedPaths).catch(() => undefined);
+      }
       setError(e instanceof Error ? e.message : "Could not publish. Try again.");
       setStep("composer");
     } finally {
@@ -413,14 +649,21 @@ export function CreationEngine({
     }
   }
 
-  const drafts = step === "drafts" ? loadDrafts() : [];
+  const drafts = useMemo(() => {
+    void draftRevision;
+    return step === "drafts" ? loadDrafts(user?.id ?? null) : [];
+  }, [draftRevision, step, user?.id]);
 
   return (
     <>
       <Sheet
         open={open && !camera}
-        onClose={onClose}
-        title={step === "hub" ? "Create" : TITLES[step]}
+        onClose={() => {
+          if (!busy) onClose();
+        }}
+        title={
+          step === "hub" ? "Create" : step === "success" && schedule ? "Scheduled" : TITLES[step]
+        }
       >
         {step !== "hub" && step !== "publishing" && step !== "success" && (
           <button
@@ -525,6 +768,12 @@ export function CreationEngine({
             onPhoto={() => fileRef.current?.click()}
             onVideo={() => videoRef.current?.click()}
             onText={() => {
+              clearPhoto();
+              clearVideo();
+              setCaption("");
+              setLocation("");
+              setTags("");
+              setSchedule("");
               setKind("story");
               setStep("text");
             }}
@@ -792,21 +1041,38 @@ export function CreationEngine({
             </div>
             <ToggleRow title="Allow comments" checked={allowComments} onChange={setAllowComments} />
             <ToggleRow title="Allow sharing" checked={allowSharing} onChange={setAllowSharing} />
-            <label className="block">
-              <span className="text-xs font-semibold text-muted-foreground">
-                Schedule (optional)
-              </span>
-              <span className="mt-1 flex items-center gap-1.5 rounded-xl border border-border bg-secondary px-3 py-2.5">
-                <Clock className="size-4 shrink-0 text-muted-foreground" />
-                <input
-                  type="datetime-local"
-                  value={schedule}
-                  onChange={(e) => setSchedule(e.target.value)}
-                  className="w-full bg-transparent text-sm outline-none"
-                />
-              </span>
-            </label>
-            {error && <p className="text-xs font-semibold text-live">{error}</p>}
+            {kind !== "story" && (
+              <label className="block">
+                <span className="text-xs font-semibold text-muted-foreground">
+                  Schedule (optional)
+                </span>
+                <span className="mt-1 flex items-center gap-1.5 rounded-xl border border-border bg-secondary px-3 py-2.5">
+                  <Clock className="size-4 shrink-0 text-muted-foreground" />
+                  <input
+                    type="datetime-local"
+                    value={schedule}
+                    onChange={(e) => setSchedule(e.target.value)}
+                    className="w-full bg-transparent text-sm outline-none"
+                  />
+                </span>
+              </label>
+            )}
+            {error && !user && !sessionLoading ? (
+              <div className="rounded-xl bg-secondary p-3 text-xs">
+                <p className="font-semibold text-live">{error}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (saveDraft()) window.location.assign("/auth");
+                  }}
+                  className="mt-2 rounded-full bg-foreground px-3 py-1.5 font-bold text-background"
+                >
+                  Save draft & sign in
+                </button>
+              </div>
+            ) : (
+              error && <p className="text-xs font-semibold text-live">{error}</p>
+            )}
             <div className="flex gap-2 pt-1">
               <button
                 onClick={saveDraft}
@@ -844,12 +1110,18 @@ export function CreationEngine({
               <Check className="size-7 text-brand-foreground" />
             </span>
             <p className="mt-3 text-[15px] font-semibold">
-              {kind === "live" ? "Stream ended" : "You're live on WIZZ"}
+              {kind === "live"
+                ? "Stream ended"
+                : schedule && kind !== "story"
+                  ? "Your post is scheduled"
+                  : "You're live on WIZZ"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {kind === "story"
                 ? "Your story disappears in 24 hours."
-                : "Thanks for sharing with your people."}
+                : schedule
+                  ? `It will publish ${new Date(schedule).toLocaleString()}.`
+                  : "Thanks for sharing with your people."}
             </p>
             <div className="mt-4 flex gap-2">
               <Link
@@ -861,11 +1133,18 @@ export function CreationEngine({
               </Link>
               <button
                 onClick={() => {
+                  clearPhoto();
+                  clearVideo();
                   setStep("hub");
-                  setPhoto(null);
-                  setVideoFile(null);
                   setTextBody("");
                   setCaption("");
+                  setLocation("");
+                  setTags("");
+                  setCategory(CATEGORIES[0] ?? "For You");
+                  setAudience("Public");
+                  setAllowComments(true);
+                  setAllowSharing(true);
+                  setSchedule("");
                 }}
                 className="flex-1 rounded-full bg-brand py-2.5 text-sm font-bold text-brand-foreground"
               >
@@ -899,14 +1178,35 @@ export function CreationEngine({
                     </span>
                     <button
                       onClick={() => {
+                        clearPhoto();
+                        clearVideo();
+                        const mediaHint =
+                          d.mediaHint ??
+                          (d.kind === "text" ? "text" : d.kind === "photo" ? "photo" : "none");
+                        const isText = mediaHint === "text";
                         setKind(d.kind);
-                        setCaption(d.caption);
-                        setTextBody(d.kind === "text" ? d.caption : "");
+                        setCaption(isText ? "" : d.caption);
+                        setTextBody(isText ? d.caption : "");
                         setLocation(d.location);
                         setTags(d.tags);
                         setCategory(d.category);
                         setAudience(d.audience);
-                        setStep("composer");
+                        setAllowComments(d.allowComments ?? true);
+                        setAllowSharing(d.allowSharing ?? true);
+                        setSchedule(d.kind === "story" ? "" : (d.schedule ?? ""));
+                        setTextBg(d.textBackground ?? TEXT_BACKGROUNDS[0]!);
+                        setStoryOverlays(d.storyOverlays ?? []);
+                        setStep(
+                          isText
+                            ? d.kind === "story"
+                              ? "text"
+                              : "composer"
+                            : mediaHint === "video"
+                              ? "video"
+                              : d.kind === "live"
+                                ? "live-setup"
+                                : d.kind,
+                        );
                       }}
                       className="rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold"
                     >
@@ -914,12 +1214,19 @@ export function CreationEngine({
                     </button>
                     <button
                       aria-label="Delete draft"
-                      onClick={() =>
-                        localStorage.setItem(
-                          DRAFT_KEY,
-                          JSON.stringify(loadDrafts().filter((x) => x.id !== d.id)),
-                        )
-                      }
+                      onClick={() => {
+                        try {
+                          localStorage.setItem(
+                            draftKey(user?.id ?? null),
+                            JSON.stringify(
+                              loadDrafts(user?.id ?? null).filter((x) => x.id !== d.id),
+                            ),
+                          );
+                          setDraftRevision((revision) => revision + 1);
+                        } catch {
+                          setError("This browser could not update drafts.");
+                        }
+                      }}
                       className="rounded-full p-1.5 hover:bg-secondary"
                     >
                       <X className="size-4 text-muted-foreground" />
@@ -939,6 +1246,7 @@ export function CreationEngine({
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) {
+              if (step === "story") clearVideo();
               attachPhoto(f);
               if (step === "hub") {
                 setKind("photo");
@@ -956,6 +1264,7 @@ export function CreationEngine({
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) {
+              if (step === "story") clearPhoto();
               attachVideo(f);
               if (step === "hub" || step === "story") {
                 setKind(step === "story" ? "story" : "video");
@@ -1253,8 +1562,8 @@ function VideoStep({
       />
       {!playable && (
         <p className="rounded-xl bg-secondary px-3 py-2 text-xs text-muted-foreground">
-          This device can&apos;t preview this format, but it will still post —
-          most phones play it fine.
+          This device can&apos;t preview this format, but it will still post — most phones play it
+          fine.
         </p>
       )}
       <div className="rounded-2xl bg-secondary p-3">
@@ -1416,7 +1725,7 @@ function StoryStep({
   const has = Boolean(photoUrl || videoUrl || textBody.trim());
   return (
     <div className="space-y-3">
-      <div className="mx-auto grid aspect-[9/16] max-h-80 w-52 place-items-center overflow-hidden rounded-2xl border border-border bg-media">
+      <div className="relative mx-auto grid aspect-[9/16] max-h-80 w-52 place-items-center overflow-hidden rounded-2xl border border-border bg-media">
         {photoUrl ? (
           <img src={photoUrl} alt="Story preview" className="size-full object-cover" />
         ) : videoUrl ? (

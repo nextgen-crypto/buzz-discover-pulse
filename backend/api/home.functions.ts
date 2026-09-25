@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { setResponseHeaders } from "@tanstack/react-start/server";
 import { cacheStats, invalidate } from "../cache/redisCache";
 import {
   EMPTY_PROFILE,
@@ -7,10 +8,29 @@ import {
   type InterestProfile,
 } from "../services/feedService";
 import { CURRENT_USER_ID } from "../database/seed";
+import { optionalSupabaseAuth } from "@/integrations/supabase/optional-auth-middleware";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-function cleanProfile(data: { cursor?: string | null; profile?: unknown } | undefined): {
+type HomeAuthContext = {
+  supabase: SupabaseClient | null;
+  userId: string | null;
+};
+
+function homeContext(context: unknown): HomeAuthContext {
+  return context as HomeAuthContext;
+}
+
+function preventSharedCaching() {
+  setResponseHeaders({ "Cache-Control": "private, no-store", Vary: "Authorization" } as never);
+}
+
+type HomeInput = { cursor?: string | null; profile?: unknown; scope?: "public" | "viewer" };
+
+function cleanProfile(data: HomeInput | undefined): {
   cursor: string | null;
   profile: InterestProfile;
+  scope: "public" | "viewer";
 } {
   const raw = (data?.profile ?? {}) as Partial<InterestProfile>;
   const strArray = (v: unknown): string[] =>
@@ -29,6 +49,7 @@ function cleanProfile(data: { cursor?: string | null; profile?: unknown } | unde
   }
   return {
     cursor: data?.cursor ?? null,
+    scope: data?.scope === "viewer" ? "viewer" : "public",
     profile: {
       followingIds: strArray(raw.followingIds),
       savedCategories: strArray(raw.savedCategories),
@@ -42,34 +63,56 @@ function cleanProfile(data: { cursor?: string | null; profile?: unknown } | unde
 }
 
 export const fetchHome = createServerFn({ method: "GET" })
-  .inputValidator((data: { cursor?: string | null; profile?: unknown } | undefined) =>
+  .middleware([optionalSupabaseAuth])
+  .inputValidator((data: HomeInput | undefined) =>
     data?.profile !== undefined
       ? cleanProfile(data)
-      : { cursor: data?.cursor ?? null, profile: EMPTY_PROFILE },
+      : { cursor: data?.cursor ?? null, profile: EMPTY_PROFILE, scope: data?.scope ?? "public" },
   )
-  .handler(async ({ data }) => getHomeFeed(data.cursor, data.profile));
+  .handler(async ({ context, data }) => {
+    preventSharedCaching();
+    if (data.scope !== "viewer") {
+      return getHomeFeed(data.cursor, data.profile, null, undefined);
+    }
+    const viewer = homeContext(context);
+    return getHomeFeed(data.cursor, data.profile, viewer.userId, viewer.supabase);
+  });
 
 export const fetchFeedPage = createServerFn({ method: "GET" })
-  .inputValidator((data: { cursor?: string | null; profile?: unknown } | undefined) =>
+  .middleware([optionalSupabaseAuth])
+  .inputValidator((data: HomeInput | undefined) =>
     data?.profile !== undefined
       ? cleanProfile(data)
       : { cursor: data?.cursor ?? null, profile: EMPTY_PROFILE },
   )
-  .handler(async ({ data }) => getFeedPage(CURRENT_USER_ID, data.cursor, data.profile));
+  .handler(async ({ context, data }) => {
+    preventSharedCaching();
+    const viewer = homeContext(context);
+    return getFeedPage(
+      viewer.userId ?? CURRENT_USER_ID,
+      data.cursor,
+      data.profile,
+      viewer.supabase,
+    );
+  });
 
 /**
  * Bust home caches after a publish so new content appears instantly
  * instead of waiting out the 60s TTL. Best-effort — failures resolve true
  * anyway because TTLs still expire stale rows.
  */
-export const invalidateHomeCache = createServerFn({ method: "POST" }).handler(async () => {
-  await Promise.all([
-    invalidate.feed(CURRENT_USER_ID),
-    invalidate.candidates(),
-    invalidate.trending("global"),
-  ]).catch(() => undefined);
-  return { ok: true as const };
-});
+export const invalidateHomeCache = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
+    preventSharedCaching();
+    await Promise.all([
+      invalidate.feedAll(),
+      invalidate.candidates(),
+      invalidate.stories(),
+      invalidate.trending("global"),
+    ]).catch(() => undefined);
+    return { ok: true as const };
+  });
 
 /** Cache backend + hit/miss counters for Admin → System health. */
 export const fetchCacheStats = createServerFn({ method: "GET" }).handler(async () => cacheStats());

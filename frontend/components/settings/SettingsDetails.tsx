@@ -158,7 +158,7 @@ export function SettingsDetail({ id, userId }: { id: string; userId: string | nu
     case "muted":
       return <MutedDetail />;
     case "muted-creators":
-      return <MutedCreatorsDetail />;
+      return <MutedCreatorsDetail userId={userId} />;
     case "content-prefs":
       return <ContentPrefsDetail />;
     case "like-counts":
@@ -472,7 +472,7 @@ function PrivacyDetail() {
 }
 
 function CloseFriendsDetail({ userId }: { userId: string | null }) {
-  const { data = [] } = useFollowList(userId, "following");
+  const { data = [] } = useFollowList(userId, "following", userId);
   const [close, setClose] = useLocalSetting<string[]>("close-friends", []);
   const set = new Set(close);
   if (!userId)
@@ -865,8 +865,8 @@ function MutedDetail() {
   );
 }
 
-function MutedCreatorsDetail() {
-  const { muted, mutedNames, unmuteAuthor } = useFeedPrefs();
+function MutedCreatorsDetail({ userId }: { userId: string | null }) {
+  const { muted, mutedNames, unmuteAuthor } = useFeedPrefs(userId);
   const [, force] = useState(0);
   if (muted.length === 0) {
     return (

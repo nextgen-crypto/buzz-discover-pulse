@@ -9,9 +9,9 @@ import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 
 /** Everyone on WIZZ, used to build the "not following you" list. */
-function useAllProfiles(enabled: boolean) {
+function useAllProfiles(enabled: boolean, viewerId: string | null) {
   return useQuery({
-    queryKey: ["all-profiles-share"],
+    queryKey: ["all-profiles-share", viewerId ?? "anonymous"],
     enabled,
     staleTime: 60_000,
     queryFn: async (): Promise<PublicProfile[]> => {
@@ -41,8 +41,8 @@ export function ShareSheet({
   const [sent, setSent] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
 
-  const { data: followers = [] } = useFollowList(user?.id ?? null, "followers");
-  const { data: everyone = [] } = useAllProfiles(open);
+  const { data: followers = [] } = useFollowList(user?.id ?? null, "followers", user?.id ?? null);
+  const { data: everyone = [] } = useAllProfiles(open, user?.id ?? null);
 
   const others = useMemo(() => {
     const followerIds = new Set(followers.map((f) => f.id));
@@ -154,7 +154,9 @@ export function ShareSheet({
                 </span>
               )}
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-foreground">{person.display_name}</p>
+                <p className="truncate text-sm font-semibold text-foreground">
+                  {person.display_name}
+                </p>
                 <p className="truncate text-xs text-muted-foreground">@{person.username}</p>
               </div>
               <button

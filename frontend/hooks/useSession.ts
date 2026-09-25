@@ -1,56 +1,93 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 
-/** Live Supabase session for the browser; null while signed out. */
-export function useSession() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(true);
+interface SessionState {
+  session: Session | null;
+  loading: boolean;
+}
 
-  useEffect(() => {
-    let active = true;
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
-      if (!active) return;
-      setSession(next);
-      setLoading(false);
-    });
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setLoading(false);
-    });
-    // Self-heal corpse sessions: a stored session whose token the server
-    // rejects (expired/revoked) breaks every write with 403s. Verify once;
-    // on a hard auth rejection (never on plain network failure) clear it so
-    // the UI honestly shows logged-out instead of silently failing writes.
-    supabase.auth.getUser().then(({ error }) => {
-      if (!active || !error) return;
-      const msg = error.message.toLowerCase();
+const INITIAL_STATE: SessionState = { session: null, loading: true };
+let state = INITIAL_STATE;
+let started = false;
+let sessionGeneration = 0;
+const listeners = new Set<() => void>();
+
+function update(next: Partial<SessionState>) {
+  state = { ...state, ...next };
+  for (const listener of listeners) listener();
+}
+
+function startSessionSync() {
+  if (started) return;
+  started = true;
+
+  supabase.auth.onAuthStateChange((_event, next) => {
+    sessionGeneration += 1;
+    update({ session: next, loading: false });
+  });
+
+  void (async () => {
+    const requestGeneration = sessionGeneration;
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (requestGeneration !== sessionGeneration) return;
+      update({ session: data.session, loading: false });
+
+      // A deleted/expired account can leave a corpse JWT in local storage.
+      // Verify once, globally, so cards and route guards do not each spam 403s.
+      const verificationGeneration = sessionGeneration;
+      const { error } = await supabase.auth.getUser();
+      if (verificationGeneration !== sessionGeneration) return;
+      if (!error) return;
+      const message = error.message.toLowerCase();
       const authDead =
-        msg.includes("invalid") ||
-        msg.includes("expired") ||
-        msg.includes("revoked") ||
-        msg.includes("not authenticated") ||
+        message.includes("invalid") ||
+        message.includes("expired") ||
+        message.includes("revoked") ||
+        message.includes("not authenticated") ||
         error.status === 401 ||
         error.status === 403;
-      const offline = msg.includes("fetch") || msg.includes("network") || msg.includes("offline");
-      if (authDead && !offline) void supabase.auth.signOut();
-    });
-    return () => {
-      active = false;
-      sub.subscription.unsubscribe();
-    };
-  }, []);
+      const offline =
+        message.includes("fetch") || message.includes("network") || message.includes("offline");
+      if (authDead && !offline) {
+        await supabase.auth.signOut().catch(() => {
+          if (verificationGeneration === sessionGeneration)
+            update({ session: null, loading: false });
+        });
+      }
+    } catch {
+      if (requestGeneration === sessionGeneration) update({ loading: false });
+    }
+  })();
+}
 
-  const meta = (session?.user.user_metadata ?? {}) as Record<string, string | undefined>;
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  startSessionSync();
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot() {
+  return state;
+}
+
+function getServerSnapshot() {
+  return INITIAL_STATE;
+}
+
+/** One shared Supabase session for the entire component tree. */
+export function useSession() {
+  const current = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const meta = (current.session?.user.user_metadata ?? {}) as Record<string, string | undefined>;
 
   return {
-    session,
-    loading,
-    user: session?.user ?? null,
-    email: session?.user.email ?? null,
+    session: current.session,
+    loading: current.loading,
+    user: current.session?.user ?? null,
+    email: current.session?.user.email ?? null,
     displayName:
-      meta['full_name'] ?? meta['name'] ?? session?.user.email?.split("@")[0] ?? null,
-    avatarUrl: meta['avatar_url'] ?? meta['picture'] ?? null,
+      meta["full_name"] ?? meta["name"] ?? current.session?.user.email?.split("@")[0] ?? null,
+    avatarUrl: meta["avatar_url"] ?? meta["picture"] ?? null,
   };
 }

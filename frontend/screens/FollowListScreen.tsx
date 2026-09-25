@@ -6,21 +6,22 @@ import {
   useProfileByUsername,
   type FollowListKind,
 } from "@/frontend/hooks/usePublicProfile";
+import { useSession } from "@/frontend/hooks/useSession";
 
-export function FollowListScreen({
-  username,
-  kind,
-}: {
-  username: string;
-  kind: FollowListKind;
-}) {
-  const { data: profile, isLoading } = useProfileByUsername(username);
-  const { data: people = [], isLoading: loadingPeople } = useFollowList(profile?.id ?? null, kind);
+export function FollowListScreen({ username, kind }: { username: string; kind: FollowListKind }) {
+  const { user } = useSession();
+  const viewerId = user?.id ?? null;
+  const { data: profile, isLoading } = useProfileByUsername(username, viewerId);
+  const { data: people = [], isLoading: loadingPeople } = useFollowList(
+    profile?.id ?? null,
+    kind,
+    viewerId,
+  );
   const heading = kind === "followers" ? "Followers" : "Following";
 
   return (
     <AppShell title={`${heading} — @${username}`}>
-       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3 px-4 pt-4 sm:px-6">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3 px-4 pt-4 sm:px-6">
         <Link
           to="/u/$username"
           params={{ username }}
@@ -29,9 +30,9 @@ export function FollowListScreen({
         >
           <ArrowLeft className="size-4 text-foreground" />
         </Link>
-         <div className="min-w-0">
-           <h2 className="truncate text-lg font-bold tracking-tight text-foreground">{heading}</h2>
-           <p className="truncate text-xs text-muted-foreground">@{username}</p>
+        <div className="min-w-0">
+          <h2 className="truncate text-lg font-bold tracking-tight text-foreground">{heading}</h2>
+          <p className="truncate text-xs text-muted-foreground">@{username}</p>
         </div>
       </div>
 
@@ -51,7 +52,7 @@ export function FollowListScreen({
           </p>
         </div>
       ) : (
-         <ul className="mt-4 grid divide-y divide-border md:grid-cols-2 md:divide-x md:divide-y-0">
+        <ul className="mt-4 grid divide-y divide-border md:grid-cols-2 md:divide-x md:divide-y-0">
           {people.map((person) => (
             <li key={person.id}>
               <Link

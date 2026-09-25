@@ -49,6 +49,7 @@ import { useSession } from "@/frontend/hooks/useSession";
 import { useConversations } from "@/frontend/hooks/useMessages";
 import { useMyProfile } from "@/frontend/hooks/useMyProfile";
 import { useNotifications } from "@/frontend/hooks/useNotifications";
+import { hydratePostMediaList } from "@/frontend/lib/postMedia";
 import { supabase } from "@/integrations/supabase/client";
 
 type SettingsRow = {
@@ -330,6 +331,7 @@ export function TopBar() {
     return () => window.removeEventListener("open-settings", handler);
   }, []);
 
+  const { session, user, displayName, email, avatarUrl } = useSession();
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [recentTick, setRecentTick] = useState(0);
@@ -376,7 +378,7 @@ export function TopBar() {
 
   const searchText = debounced.trim();
   const { data: realPosts = [], isLoading: postsLoading } = useQuery({
-    queryKey: ["search-posts", searchText],
+    queryKey: ["search-posts", user?.id ?? "anonymous", searchText],
     enabled: open === "search" && searchText.length >= 2,
     staleTime: 30_000,
     queryFn: async (): Promise<
@@ -384,35 +386,47 @@ export function TopBar() {
         id: string;
         caption: string;
         image_url: string | null;
+        image_path?: string;
         category: string;
         author_id: string;
         username: string;
       }[]
     > => {
-      const { data, error } = await supabase
-        .from("posts")
-        .select("id, caption, image_url, category, author_id, profiles!inner(username)")
-        .or(`caption.ilike.%${searchText}%,category.ilike.%${searchText}%`)
-        .order("created_at", { ascending: false })
-        .limit(6);
-      if (error) throw error;
-      return (
-        (data ?? []) as {
+      const runSearch = (select: string) =>
+        supabase
+          .from("posts")
+          .select(select)
+          .eq("status", "published")
+          .or(`caption.ilike.%${searchText}%,category.ilike.%${searchText}%`)
+          .order("created_at", { ascending: false })
+          .limit(6);
+      const current = await runSearch(
+        "id, caption, image_url, image_path, category, author_id, profiles!inner(username)",
+      );
+      const compatible = current.error
+        ? await runSearch("id, caption, image_url, category, author_id, profiles!inner(username)")
+        : current;
+      if (compatible.error) throw compatible.error;
+      const posts = (
+        (compatible.data ?? []) as unknown as {
           id: string;
           caption: string;
           image_url: string | null;
+          image_path?: string;
           category: string;
           author_id: string;
           profiles: { username: string } | null;
         }[]
-      ).map((p) => ({
-        id: p.id,
-        caption: p.caption,
-        image_url: p.image_url,
-        category: p.category,
-        author_id: p.author_id,
-        username: p.profiles?.username ?? "?",
+      ).map((post) => ({
+        id: post.id,
+        caption: post.caption,
+        image_url: post.image_url,
+        image_path: post.image_path ?? "",
+        category: post.category,
+        author_id: post.author_id,
+        username: post.profiles?.username ?? "?",
       }));
+      return hydratePostMediaList(posts);
     },
   });
 
@@ -472,7 +486,7 @@ export function TopBar() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const recents = useMemo(loadRecent, [recentTick, open]);
   const { data: realPeople = [] } = useQuery({
-    queryKey: ["search-profiles", searchText],
+    queryKey: ["search-profiles", user?.id ?? "anonymous", searchText],
     enabled: open === "search" && searchText.length >= 2,
     staleTime: 30_000,
     queryFn: async (): Promise<
@@ -514,7 +528,6 @@ export function TopBar() {
     ];
   }, [results.people, realPeople]);
 
-  const { session, user, displayName, email, avatarUrl } = useSession();
   const {
     items: inbox,
     unread: inboxUnread,

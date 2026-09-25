@@ -23,7 +23,9 @@ import {
   stories,
   trending,
 } from "../database/seed";
-import type { CursorPage, Creator, Post, Story, TrendingTopic } from "../domain/types";
+import type { CursorPage, Creator, Post, TrendingTopic } from "../domain/types";
+import { imageUrl, videoUrl } from "../domain/media";
+import { createKeyAwareSupabaseFetch } from "../integrations/supabase/key-aware-fetch";
 
 export interface FeedAuthor {
   id: string;
@@ -38,13 +40,25 @@ export interface FeedItem {
   author: FeedAuthor;
   /** Short-form clip attached to the card, when the ranker picked video. */
   clipObjectKey?: string;
-  /** Owner-uploaded video (signed URL). Takes precedence over clipObjectKey. */
+  /** Owner-uploaded video (short-lived signed URL). Takes precedence over clipObjectKey. */
   videoSrc?: string;
+  /** Internal canonical paths, resolved only for the returned page slice. */
+  imagePath?: string;
+  videoPath?: string;
 }
 
 export interface StoryItem {
-  story: Story;
+  id: string;
   author: FeedAuthor;
+  mediaUrl: string;
+  mediaType: "image" | "video" | "text";
+  caption: string;
+  background: string;
+  overlays: string[];
+  createdAt: string;
+  expiresAt: string | null;
+  viewed: boolean;
+  real: boolean;
 }
 
 export interface HomeFeed {
@@ -106,9 +120,13 @@ const MAX_CREATOR_PER_PAGE = 2;
 
 const byId = new Map(creators.map((c) => [c.id, c]));
 
-/** Anonymous server-side reader. RLS grants public SELECT on profiles/posts/follows. */
+/**
+ * Server reader supplied by optional auth middleware. The process-local fallback
+ * remains anonymous for direct service calls and zero-config/demo environments.
+ */
 let anonClient: SupabaseClient | null | undefined;
-function serverSupabase(): SupabaseClient | null {
+function serverSupabase(viewerClient?: SupabaseClient | null): SupabaseClient | null {
+  if (viewerClient !== undefined) return viewerClient;
   if (anonClient !== undefined) return anonClient;
   const url = process.env["SUPABASE_URL"] ?? process.env["VITE_SUPABASE_URL"];
   const key =
@@ -118,9 +136,41 @@ function serverSupabase(): SupabaseClient | null {
     return anonClient;
   }
   anonClient = createClient(url, key, {
+    global: { fetch: createKeyAwareSupabaseFetch(key) },
     auth: { persistSession: false, autoRefreshToken: false },
   });
   return anonClient;
+}
+
+const MEDIA_URL_TTL_SECONDS = 5 * 60;
+
+async function signStoredMedia(
+  supabase: SupabaseClient,
+  path: string | null | undefined,
+  transform?: { width: number; quality: number },
+): Promise<string | null> {
+  if (!path) return null;
+  const result = await supabase.storage
+    .from("post-images")
+    .createSignedUrl(path, MEDIA_URL_TTL_SECONDS, transform ? { transform } : undefined);
+  return result.error ? null : result.data.signedUrl;
+}
+
+async function signStoredMediaBatch(
+  supabase: SupabaseClient,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const uniquePaths = [...new Set(paths.filter(Boolean))];
+  if (uniquePaths.length === 0) return new Map();
+  const result = await supabase.storage
+    .from("post-images")
+    .createSignedUrls(uniquePaths, MEDIA_URL_TTL_SECONDS);
+  if (result.error || !result.data) return new Map();
+  return new Map(
+    result.data.flatMap((item) =>
+      item.path && item.signedUrl && !item.error ? [[item.path, item.signedUrl] as const] : [],
+    ),
+  );
 }
 
 interface RealPostRow {
@@ -128,7 +178,19 @@ interface RealPostRow {
   author_id: string;
   caption: string;
   image_url: string | null;
+  image_path?: string | null;
   video_url?: string | null;
+  video_path?: string | null;
+  comments_count?: number;
+  comments_enabled?: boolean;
+  allow_sharing?: boolean;
+  visibility?: string;
+  status?: string;
+  content_kind?: string;
+  scheduled_at?: string | null;
+  story_expires_at?: string | null;
+  story_overlays?: string[];
+  story_background?: string | null;
   hashtags: string[];
   location: string | null;
   category: string;
@@ -178,16 +240,50 @@ interface RealCandidate {
   followers: number;
 }
 
-/** Posts select that tolerates a pre-part7 backend (no video_url yet). */
+function isMissingSchemaError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  const code = typeof candidate?.code === "string" ? candidate.code : "";
+  const message = typeof candidate?.message === "string" ? candidate.message : "";
+  return (
+    /^(42703|42P01|PGRST20[45])$/i.test(code) ||
+    /column .* does not exist|relation .* does not exist|schema cache/i.test(message)
+  );
+}
+
+/** Posts select that tolerates projects that have not applied the newest posting migration. */
 async function tryRealSelect(
   supabase: NonNullable<ReturnType<typeof serverSupabase>>,
 ): Promise<{ data: unknown[] | null; error: unknown }> {
   const full = await supabase
     .from("posts")
-    .select("id, author_id, caption, image_url, video_url, hashtags, location, category, created_at")
+    .select(
+      "id, author_id, caption, image_url, image_path, video_url, video_path, comments_count, comments_enabled, allow_sharing, visibility, status, content_kind, scheduled_at, story_expires_at, story_overlays, story_background, hashtags, location, category, created_at",
+    )
+    .eq("status", "published")
+    .eq("content_kind", "post")
+    .or(`scheduled_at.is.null,scheduled_at.lte.${new Date().toISOString()}`)
     .order("created_at", { ascending: false })
     .limit(REAL_POST_LIMIT);
   if (!full.error) return { data: full.data as unknown[], error: null };
+  if (!isMissingSchemaError(full.error)) {
+    return { data: null, error: full.error };
+  }
+
+  const compatible = await supabase
+    .from("posts")
+    .select(
+      "id, author_id, caption, image_url, video_url, comments_count, comments_enabled, visibility, hashtags, location, category, created_at",
+    )
+    .eq("status", "published")
+    .order("created_at", { ascending: false })
+    .limit(REAL_POST_LIMIT);
+  if (!compatible.error) {
+    return { data: compatible.data as unknown[], error: null };
+  }
+  if (!isMissingSchemaError(compatible.error)) {
+    return { data: null, error: compatible.error };
+  }
+
   const legacy = await supabase
     .from("posts")
     .select("id, author_id, caption, image_url, hashtags, location, category, created_at")
@@ -196,8 +292,8 @@ async function tryRealSelect(
   return { data: legacy.data as unknown[] | null, error: legacy.error };
 }
 
-async function fetchRealCandidates(): Promise<RealCandidate[]> {
-  const supabase = serverSupabase();
+async function fetchRealCandidates(viewerClient?: SupabaseClient | null): Promise<RealCandidate[]> {
+  const supabase = serverSupabase(viewerClient);
   if (!supabase) return [];
   const { data: rows, error } = await tryRealSelect(supabase);
   if (error || !rows || rows.length === 0) return [];
@@ -221,16 +317,17 @@ async function fetchRealCandidates(): Promise<RealCandidate[]> {
   for (const row of real) {
     const profile = profiles.get(row.author_id);
     if (!profile) continue;
+    const imageKey = row.image_path || row.image_url;
     const post: Post = {
       id: row.id,
       authorId: row.author_id,
       source: "buzz",
       caption: row.caption,
-      media: row.image_url
+      media: imageKey
         ? [
             {
               kind: "image",
-              objectKey: row.image_url,
+              objectKey: imageKey,
               width: 1080,
               height: 1080,
               blurColor: "#888",
@@ -241,9 +338,18 @@ async function fetchRealCandidates(): Promise<RealCandidate[]> {
       hashtags: row.hashtags ?? [],
       ...(row.location ? { location: row.location } : {}),
       category: row.category,
-      metrics: { likes: 0, comments: 0, shares: 0, saves: 0, views: 0 },
+      metrics: {
+        likes: 0,
+        comments: row.comments_count ?? 0,
+        shares: 0,
+        saves: 0,
+        views: 0,
+      },
       createdAt: row.created_at,
-      visibility: "public",
+      visibility:
+        row.visibility === "followers" || row.visibility === "private" ? row.visibility : "public",
+      commentsEnabled: row.comments_enabled !== false,
+      allowSharing: row.allow_sharing !== false,
       moderationStatus: "approved",
     };
     out.push({
@@ -257,11 +363,45 @@ async function fetchRealCandidates(): Promise<RealCandidate[]> {
           verified: profile.verified,
         },
         ...(row.video_url ? { videoSrc: row.video_url } : {}),
+        ...(row.image_path ? { imagePath: row.image_path } : {}),
+        ...(row.video_path ? { videoPath: row.video_path } : {}),
       },
       followers: followerCount.get(row.author_id) ?? 0,
     });
   }
   return out;
+}
+
+async function resolveFeedItemMedia(
+  items: FeedItem[],
+  viewerClient?: SupabaseClient | null,
+): Promise<FeedItem[]> {
+  const supabase = serverSupabase(viewerClient);
+  if (!supabase) {
+    return items.map(({ imagePath: _imagePath, videoPath: _videoPath, ...item }) => item);
+  }
+  return Promise.all(
+    items.map(async ({ imagePath, videoPath, ...item }) => {
+      const [imageUrl, videoUrl] = await Promise.all([
+        signStoredMedia(supabase, imagePath, { width: 1280, quality: 75 }),
+        signStoredMedia(supabase, videoPath),
+      ]);
+      return {
+        ...item,
+        post: {
+          ...item.post,
+          media: imageUrl
+            ? item.post.media.map((media) =>
+                media.kind === "image" ? { ...media, objectKey: imageUrl } : media,
+              )
+            : imagePath
+              ? item.post.media.filter((media) => media.kind !== "image")
+              : item.post.media,
+        },
+        ...(videoUrl ? { videoSrc: videoUrl } : {}),
+      };
+    }),
+  );
 }
 
 interface Candidates {
@@ -271,13 +411,16 @@ interface Candidates {
   stats: Map<string, number>;
 }
 
-/** Global candidate pool — identical for every viewer, safe to cache. */
-async function getCandidates(): Promise<Candidates> {
-  return cacheAside("candidates:global", TTL.feed, async () => {
+/** Viewer-scoped candidate pool. RLS can expose different rows to each user. */
+async function getCandidates(
+  viewerId: string,
+  viewerClient?: SupabaseClient | null,
+): Promise<Candidates> {
+  const load = async (): Promise<Candidates> => {
     const [real, seedPosts, stats] = await Promise.all([
-      fetchRealCandidates().catch(() => [] as RealCandidate[]),
+      fetchRealCandidates(viewerClient).catch(() => [] as RealCandidate[]),
       Promise.resolve(rankedSeedPosts()),
-      fetchPostStats().catch(() => new Map<string, number>()),
+      fetchPostStats(viewerClient).catch(() => new Map<string, number>()),
     ]);
     const seed: FeedItem[] = seedPosts.map((post, i) => {
       const clip = shorts[i % shorts.length];
@@ -289,12 +432,18 @@ async function getCandidates(): Promise<Candidates> {
       };
     });
     return { real, seed, stats };
-  });
+  };
+
+  // Shared caching is safe only for the anonymous viewer. Authenticated rows
+  // must be re-read after blocks, follows, privacy, or visibility changes.
+  return viewerId === CURRENT_USER_ID
+    ? cacheAside(cacheKeys.candidates(viewerId), TTL.feed, load)
+    : load();
 }
 
 /** Public impression counters for rate-based discovery (empty until migration). */
-async function fetchPostStats(): Promise<Map<string, number>> {
-  const supabase = serverSupabase();
+async function fetchPostStats(viewerClient?: SupabaseClient | null): Promise<Map<string, number>> {
+  const supabase = serverSupabase(viewerClient);
   if (!supabase) return new Map();
   const { data, error } = await supabase
     .from("post_stats")
@@ -534,8 +683,10 @@ function tupleAfter(a: RankTuple, cur: FeedCursor): boolean {
 async function rankAll(
   profile: InterestProfile,
   now: number,
+  viewerId: string,
+  viewerClient?: SupabaseClient | null,
 ): Promise<{ items: FeedItem[]; tuples: RankTuple[] }> {
-  const { real, seed, stats } = await getCandidates();
+  const { real, seed, stats } = await getCandidates(viewerId, viewerClient);
   const weights = laneWeightsFor(profile);
   const queues: Record<Scored["lane"], Scored[]> = { personalized: [], fresh: [], discovery: [] };
   for (const r of real) {
@@ -565,18 +716,37 @@ async function rankAll(
   };
 }
 
+function profileCacheKey(profile: InterestProfile): string {
+  const serialized = JSON.stringify({
+    followingIds: [...profile.followingIds].sort(),
+    savedCategories: [...profile.savedCategories].sort(),
+    savedTags: [...profile.savedTags].sort(),
+    mutedAuthorIds: [...profile.mutedAuthorIds].sort(),
+    hiddenPostIds: [...profile.hiddenPostIds].sort(),
+    notInterestedPostIds: [...profile.notInterestedPostIds].sort(),
+    watched: Object.entries(profile.watched).sort(([a], [b]) => a.localeCompare(b)),
+  });
+  let hash = 2166136261;
+  for (let i = 0; i < serialized.length; i++) {
+    hash ^= serialized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 export async function getFeedPage(
   userId: string,
   cursor: string | null,
   profile?: InterestProfile | null,
+  viewerClient?: SupabaseClient | null,
 ): Promise<CursorPage<FeedItem>> {
   const clean = sanitizeProfile(profile);
   // Pin "now" inside the cursor so every page of a session ranks identically.
   const decoded = decodeCursor(cursor);
   const now = decoded && Number.isFinite(decoded.n) ? decoded.n : Date.now();
   const cacheKey = decoded ? cursor! : "start";
-  return cacheAside(cacheKeys.feed(userId, cacheKey), TTL.feed, async () => {
-    const { items, tuples } = await rankAll(clean, now);
+  const load = async (): Promise<CursorPage<FeedItem>> => {
+    const { items, tuples } = await rankAll(clean, now, userId, viewerClient);
     let startIndex = 0;
     if (decoded) {
       const idx = tuples.findIndex((t, i) => items[i]?.post.id === decoded.id);
@@ -592,20 +762,120 @@ export async function getFeedPage(
     const last = slice[slice.length - 1];
     const lastTuple = sliceTuples[sliceTuples.length - 1];
     const hasMore = startIndex + slice.length < items.length;
+    const resolvedSlice = await resolveFeedItemMedia(slice, viewerClient);
     return {
-      items: slice,
+      items: resolvedSlice,
       nextCursor: hasMore && last && lastTuple ? encodeCursor({ ...lastTuple, n: now }) : null,
       hasMore,
     };
+  };
+
+  return userId === CURRENT_USER_ID
+    ? cacheAside(cacheKeys.feed(userId, cacheKey, profileCacheKey(clean)), TTL.feed, load)
+    : load();
+}
+
+interface RealStoryRow {
+  id: string;
+  author_id: string;
+  caption: string;
+  image_url: string | null;
+  image_path: string | null;
+  video_url: string | null;
+  video_path: string | null;
+  story_background: string | null;
+  story_overlays: string[];
+  created_at: string;
+  story_expires_at: string;
+}
+
+async function fetchRealStories(viewerClient?: SupabaseClient | null): Promise<StoryItem[]> {
+  const supabase = serverSupabase(viewerClient);
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from("posts")
+    .select(
+      "id, author_id, caption, image_url, image_path, video_url, video_path, story_background, story_overlays, created_at, story_expires_at",
+    )
+    .eq("status", "published")
+    .eq("content_kind", "story")
+    .gt("story_expires_at", new Date().toISOString())
+    .order("story_expires_at", { ascending: false })
+    .limit(50);
+  if (error || !data?.length) return [];
+
+  const rows = data as unknown as RealStoryRow[];
+  const authorIds = [...new Set(rows.map((row) => row.author_id))];
+  const { data: profileRows } = await supabase
+    .from("profiles")
+    .select("id, username, display_name, avatar_url, verified")
+    .in("id", authorIds);
+  const profiles = new Map(
+    ((profileRows ?? []) as RealProfileRow[]).map((profile) => [profile.id, profile]),
+  );
+
+  const signedMedia = await signStoredMediaBatch(
+    supabase,
+    rows.flatMap((row) =>
+      [row.image_path, row.video_path].filter((path): path is string => !!path),
+    ),
+  );
+  return rows.flatMap((row) => {
+    const profile = profiles.get(row.author_id);
+    if (!profile) return [];
+    const imageUrl = (row.image_path ? signedMedia.get(row.image_path) : null) ?? row.image_url;
+    const videoUrl = (row.video_path ? signedMedia.get(row.video_path) : null) ?? row.video_url;
+    return [
+      {
+        id: row.id,
+        author: {
+          id: profile.id,
+          username: profile.username,
+          displayName: profile.display_name,
+          avatarKey: profile.avatar_url ?? "",
+          verified: profile.verified,
+        },
+        mediaUrl: videoUrl ?? imageUrl ?? "",
+        mediaType: videoUrl ? "video" : imageUrl ? "image" : "text",
+        caption: row.caption,
+        background: row.story_background ?? "#111827",
+        overlays: row.story_overlays ?? [],
+        createdAt: row.created_at,
+        expiresAt: row.story_expires_at,
+        viewed: false,
+        real: true,
+      } satisfies StoryItem,
+    ];
   });
 }
 
-export async function getStoryRail(userId: string): Promise<StoryItem[]> {
-  return cacheAside(`stories:${userId}`, TTL.feed, async () =>
-    [...stories]
+export async function getStoryRail(
+  userId: string,
+  viewerClient?: SupabaseClient | null,
+): Promise<StoryItem[]> {
+  const load = async (): Promise<StoryItem[]> => {
+    const real = await fetchRealStories(viewerClient).catch(() => []);
+    const seed = [...stories]
       .sort((a, b) => Number(a.viewed) - Number(b.viewed) || b.createdAt.localeCompare(a.createdAt))
-      .map((story) => ({ story, author: toAuthor(story.authorId) })),
-  );
+      .map((story): StoryItem => ({
+        id: story.id,
+        author: toAuthor(story.authorId),
+        mediaUrl: imageUrl(story.media.objectKey, "thumbnail"),
+        mediaType: "image",
+        caption: "",
+        background: "#111827",
+        overlays: [],
+        createdAt: story.createdAt,
+        expiresAt: null,
+        viewed: story.viewed,
+        real: false,
+      }));
+    return [...real, ...seed];
+  };
+
+  return userId === CURRENT_USER_ID
+    ? cacheAside(cacheKeys.stories(userId), TTL.feed, load)
+    : load();
 }
 
 export async function getTrending(region: string): Promise<TrendingTopic[]> {
@@ -625,12 +895,26 @@ async function fetchRealTrending(now: number): Promise<TrendingTopic[]> {
   const supabase = serverSupabase();
   if (!supabase) return [];
   const since = new Date(now - 14 * 86_400_000).toISOString();
-  const { data, error } = await supabase
+  const current = await supabase
     .from("posts")
     .select("hashtags, created_at")
+    .eq("status", "published")
+    .eq("visibility", "public")
+    .eq("content_kind", "post")
     .gte("created_at", since)
     .limit(1000);
-  if (error || !data) return [];
+  if (current.error && !isMissingSchemaError(current.error)) return [];
+  const compatible = current.error
+    ? await supabase
+        .from("posts")
+        .select("hashtags, created_at")
+        .eq("status", "published")
+        .eq("visibility", "public")
+        .gte("created_at", since)
+        .limit(1000)
+    : current;
+  if (compatible.error || !compatible.data) return [];
+  const data = compatible.data;
   const week = 7 * 86_400_000;
   const recent = new Map<string, number>();
   const prior = new Map<string, number>();
@@ -659,13 +943,17 @@ async function fetchRealTrending(now: number): Promise<TrendingTopic[]> {
 export async function getHomeFeed(
   cursor: string | null,
   profile?: InterestProfile | null,
+  viewerId: string | null = null,
+  viewerClient?: SupabaseClient | null,
 ): Promise<HomeFeed> {
-  const userId = CURRENT_USER_ID;
+  const userId = viewerId ?? CURRENT_USER_ID;
   const [storyRail, topics, feed] = await Promise.all([
-    getStoryRail(userId),
+    getStoryRail(userId, viewerClient),
     getTrending("global"),
-    getFeedPage(userId, cursor, profile),
+    getFeedPage(userId, cursor, profile, viewerClient),
   ]);
-  const currentUser = byId.get(userId)!;
+  // Creator-shaped display chrome still uses the bundled demo identity. The
+  // viewer's real UUID is only the RLS/cache identity above.
+  const currentUser = byId.get(CURRENT_USER_ID)!;
   return { currentUser, stories: storyRail, trending: topics, feed };
 }

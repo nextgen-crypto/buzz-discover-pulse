@@ -82,11 +82,18 @@ export function useAdminMetrics(enabled: boolean) {
         for (const r of [usersRes, posts, follows, profiles, followsRows]) {
           if (r.error) throw r.error;
         }
-        const postRows = await supabase
+        const currentPosts = await supabase
           .from("posts")
-          .select("id, author_id, caption, image_url, category, hashtags, created_at")
+          .select("id, author_id, caption, image_url, image_path, category, hashtags, created_at")
           .order("created_at", { ascending: false })
           .limit(1000);
+        const postRows = currentPosts.error
+          ? await supabase
+              .from("posts")
+              .select("id, author_id, caption, image_url, category, hashtags, created_at")
+              .order("created_at", { ascending: false })
+              .limit(1000)
+          : currentPosts;
         if (postRows.error) throw postRows.error;
 
         // 14-day series buckets.
@@ -186,6 +193,7 @@ export function useAdminMetrics(enabled: boolean) {
             author_id: string;
             caption: string;
             image_url: string | null;
+            image_path?: string | null;
             created_at: string;
           }[]
         )
@@ -195,7 +203,7 @@ export function useAdminMetrics(enabled: boolean) {
             caption: p.caption,
             author: nameOf.get(p.author_id) ?? "unknown",
             created_at: p.created_at,
-            hasImage: Boolean(p.image_url),
+            hasImage: Boolean(p.image_url || p.image_path),
           }));
         if (!cancelled) {
           setData({

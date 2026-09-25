@@ -24,6 +24,7 @@ import { useMyProfile } from "@/frontend/hooks/useMyProfile";
 import { useMyPosts, useMyStats } from "@/frontend/hooks/useMyProfileData";
 import { useMyStorySaves } from "@/frontend/hooks/useStoryDetail";
 import { useSavedPosts } from "@/frontend/hooks/useSavedPosts";
+import type { SavedPost } from "@/frontend/hooks/useSavedPosts";
 
 import { supabase } from "@/integrations/supabase/client";
 import { openCreate } from "@/frontend/components/home/nav-items";
@@ -36,6 +37,10 @@ const tabs = [
   { id: "clips", label: "Clips", Icon: Play },
   { id: "saved", label: "Saved", Icon: Bookmark },
 ] as const;
+
+function isOwnedPost(post: ProfilePost | SavedPost): post is ProfilePost {
+  return "status" in post;
+}
 
 export function ProfileScreen() {
   const { session, loading, user: authUser, displayName, email, avatarUrl } = useSession();
@@ -129,13 +134,28 @@ export function ProfileScreen() {
   // Pinned first, then newest. Badges below are owner-only (this is the
   // owner's own profile — visitors never render this screen).
   const publishedPosts = myPosts
-    .filter((p) => (p.status ?? "published") === "published")
+    .filter(
+      (p) =>
+        (p.status ?? "published") === "published" &&
+        (p.content_kind ?? "post") !== "story" &&
+        (!p.scheduled_at || Date.parse(p.scheduled_at) <= Date.now()),
+    )
     .sort((a, b) => Number(b.is_pinned ?? false) - Number(a.is_pinned ?? false));
   const clipPosts = publishedPosts.filter((p) => p.video_url);
-  const archivedPosts = myPosts.filter((p) => p.status === "archived");
-  const deletedPosts = myPosts.filter((p) => p.status === "deleted");
-  const gridPosts =
-    tab === "grid" ? publishedPosts : tab === "clips" ? clipPosts : savedPosts;
+  const scheduledPosts = myPosts
+    .filter(
+      (p) =>
+        (p.content_kind ?? "post") === "post" &&
+        (p.status === "scheduled" || (p.scheduled_at && Date.parse(p.scheduled_at) > Date.now())),
+    )
+    .sort((a, b) => Date.parse(a.scheduled_at ?? "0") - Date.parse(b.scheduled_at ?? "0"));
+  const archivedPosts = myPosts.filter(
+    (p) => p.status === "archived" && (p.content_kind ?? "post") === "post",
+  );
+  const deletedPosts = myPosts.filter(
+    (p) => p.status === "deleted" && (p.content_kind ?? "post") === "post",
+  );
+  const gridPosts = tab === "grid" ? publishedPosts : tab === "clips" ? clipPosts : savedPosts;
 
   return (
     <AppShell title="Profile">
@@ -298,7 +318,7 @@ export function ProfileScreen() {
         <div className="mt-3 grid grid-cols-3 gap-0.5 sm:grid-cols-4">
           {gridPosts.map((p) => (
             <div key={p.id} className="relative">
-              {"video_url" in p && p.video_url ? (
+              {isOwnedPost(p) && p.video_url ? (
                 <video
                   src={p.video_url}
                   muted
@@ -306,9 +326,9 @@ export function ProfileScreen() {
                   preload="metadata"
                   className="aspect-square w-full bg-surface-strong object-cover"
                 />
-              ) : (("thumbnail_url" in p && p.thumbnail_url) || p.image_url) ? (
+              ) : (isOwnedPost(p) && p.thumbnail_url) || p.image_url ? (
                 <img
-                  src={("thumbnail_url" in p && p.thumbnail_url) || p.image_url!}
+                  src={(isOwnedPost(p) && p.thumbnail_url) || p.image_url!}
                   alt={p.caption || "Post"}
                   loading="lazy"
                   className="aspect-square w-full bg-surface-strong object-cover"
@@ -318,17 +338,16 @@ export function ProfileScreen() {
                   {p.caption.slice(0, 60)}
                 </div>
               )}
-              {(("is_pinned" in p && p.is_pinned) ||
-                ("visibility" in p && p.visibility === "private")) && (
+              {isOwnedPost(p) && (p.is_pinned || p.visibility === "private") && (
                 <span className="absolute left-1 top-1 flex items-center gap-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                  {"is_pinned" in p && p.is_pinned && <Pin className="size-3" />}
-                  {"is_pinned" in p && p.is_pinned ? "Pinned" : "Private"}
+                  {p.is_pinned && <Pin className="size-3" />}
+                  {p.is_pinned ? "Pinned" : "Private"}
                 </span>
               )}
-              {tab !== "saved" && "status" in p && (
+              {tab !== "saved" && isOwnedPost(p) && (
                 <button
                   aria-label="Manage post"
-                  onClick={() => setManaging(p as unknown as ProfilePost)}
+                  onClick={() => setManaging(p)}
                   className="absolute right-1 top-1 grid size-7 place-items-center rounded-full bg-black/55 text-white"
                 >
                   <MoreHorizontal className="size-4" />
@@ -375,11 +394,39 @@ export function ProfileScreen() {
                 <Link
                   to="/news/$articleId"
                   params={{ articleId: s.id }}
+                  search={{ q: "" }}
                   className="block px-3 py-2.5"
                 >
                   <span className="block truncate text-sm font-semibold">{s.headline}</span>
                   <span className="block text-[11px] text-muted-foreground">{s.category}</span>
                 </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {tab === "grid" && scheduledPosts.length > 0 && (
+        <div className="px-4 pt-4">
+          <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+            Scheduled ({scheduledPosts.length})
+          </p>
+          <ul className="mt-2 divide-y divide-border rounded-2xl border border-border">
+            {scheduledPosts.map((p) => (
+              <li key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  {p.caption.slice(0, 60) || "Untitled"}
+                  {p.scheduled_at && (
+                    <span className="ml-2 text-[11px] text-muted-foreground">
+                      {new Date(p.scheduled_at).toLocaleString()}
+                    </span>
+                  )}
+                </span>
+                <button
+                  onClick={() => setManaging(p)}
+                  className="shrink-0 rounded-full bg-secondary px-3 py-1.5 text-xs font-bold"
+                >
+                  Manage
+                </button>
               </li>
             ))}
           </ul>
@@ -446,7 +493,7 @@ export function ProfileScreen() {
           onClose={() => setManaging(null)}
           userId={authUser.id}
           post={managing}
-          username={myProfile?.username ?? undefined}
+          {...(myProfile?.username ? { username: myProfile.username } : {})}
         />
       )}
     </AppShell>

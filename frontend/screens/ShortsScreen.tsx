@@ -249,6 +249,7 @@ export function ShortsScreen() {
   const { data: followers = [], isLoading: loadingFollowers } = useFollowList(
     myProfile?.id ?? null,
     "followers",
+    userId,
   );
 
   const videoEls = useRef(new Map<string, HTMLVideoElement>());

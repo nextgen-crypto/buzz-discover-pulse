@@ -8,6 +8,108 @@ export type Database = {
   };
   public: {
     Tables: {
+      ad_campaigns: {
+        Row: {
+          advertiser_id: string;
+          budget_cents: number;
+          cta_label: string;
+          cta_url: string;
+          clicks: number;
+          created_at: string;
+          currency: string;
+          ends_at: string | null;
+          engagements: number;
+          frequency_cap_per_day: number;
+          frequency_every_n: number;
+          hides: number;
+          id: string;
+          impressions: number;
+          metadata: Json;
+          name: string;
+          objective: string;
+          package: string;
+          placement: string;
+          post_id: string | null;
+          rejection_reason: string;
+          spend_cents: number;
+          starts_at: string | null;
+          status: string;
+          targeting: Json;
+          updated_at: string;
+        };
+        Insert: {
+          advertiser_id: string;
+          budget_cents?: number;
+          cta_label?: string;
+          cta_url?: string;
+          clicks?: number;
+          created_at?: string;
+          currency?: string;
+          ends_at?: string | null;
+          engagements?: number;
+          frequency_cap_per_day?: number;
+          frequency_every_n?: number;
+          hides?: number;
+          id?: string;
+          impressions?: number;
+          metadata?: Json;
+          name?: string;
+          objective?: string;
+          package?: string;
+          placement?: string;
+          post_id?: string | null;
+          rejection_reason?: string;
+          spend_cents?: number;
+          starts_at?: string | null;
+          status?: string;
+          targeting?: Json;
+          updated_at?: string;
+        };
+        Update: {
+          advertiser_id?: string;
+          budget_cents?: number;
+          cta_label?: string;
+          cta_url?: string;
+          clicks?: number;
+          created_at?: string;
+          currency?: string;
+          ends_at?: string | null;
+          engagements?: number;
+          frequency_cap_per_day?: number;
+          frequency_every_n?: number;
+          hides?: number;
+          id?: string;
+          impressions?: number;
+          metadata?: Json;
+          name?: string;
+          objective?: string;
+          package?: string;
+          placement?: string;
+          post_id?: string | null;
+          rejection_reason?: string;
+          spend_cents?: number;
+          starts_at?: string | null;
+          status?: string;
+          targeting?: Json;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "ad_campaigns_advertiser_id_fkey";
+            columns: ["advertiser_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "ad_campaigns_post_id_fkey";
+            columns: ["post_id"];
+            isOneToOne: false;
+            referencedRelation: "posts";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       blocks: {
         Row: {
           blocked_id: string;
@@ -459,51 +561,96 @@ export type Database = {
       };
       posts: {
         Row: {
+          allow_duet: boolean;
+          allow_downloads: boolean;
+          allow_remix: boolean;
+          allow_sharing: boolean;
           author_id: string;
           caption: string;
           category: string;
           comments_count: number;
           comments_enabled: boolean;
+          content_kind: string;
           created_at: string;
           hashtags: string[];
           id: string;
+          image_path: string;
           image_url: string | null;
           is_edited: boolean;
+          is_pinned: boolean;
           location: string | null;
+          scheduled_at: string | null;
           status: string;
+          story_background: string | null;
+          story_expires_at: string | null;
+          story_overlays: string[];
+          thumbnail_path: string;
+          thumbnail_url: string;
           updated_at: string;
+          video_path: string;
+          video_url: string;
           visibility: string;
         };
         Insert: {
+          allow_duet?: boolean;
+          allow_downloads?: boolean;
+          allow_remix?: boolean;
+          allow_sharing?: boolean;
           author_id: string;
           caption?: string;
           category?: string;
           comments_count?: number;
           comments_enabled?: boolean;
+          content_kind?: string;
           created_at?: string;
           hashtags?: string[];
           id?: string;
+          image_path?: string;
           image_url?: string | null;
           is_edited?: boolean;
+          is_pinned?: boolean;
           location?: string | null;
+          scheduled_at?: string | null;
           status?: string;
+          story_background?: string | null;
+          story_expires_at?: string | null;
+          story_overlays?: string[];
+          thumbnail_path?: string;
+          thumbnail_url?: string;
           updated_at?: string;
+          video_path?: string;
+          video_url?: string;
           visibility?: string;
         };
         Update: {
+          allow_duet?: boolean;
+          allow_downloads?: boolean;
+          allow_remix?: boolean;
+          allow_sharing?: boolean;
           author_id?: string;
           caption?: string;
           category?: string;
           comments_count?: number;
           comments_enabled?: boolean;
+          content_kind?: string;
           created_at?: string;
           hashtags?: string[];
           id?: string;
+          image_path?: string;
           image_url?: string | null;
           is_edited?: boolean;
+          is_pinned?: boolean;
           location?: string | null;
+          scheduled_at?: string | null;
           status?: string;
+          story_background?: string | null;
+          story_expires_at?: string | null;
+          story_overlays?: string[];
+          thumbnail_path?: string;
+          thumbnail_url?: string;
           updated_at?: string;
+          video_path?: string;
+          video_url?: string;
           visibility?: string;
         };
         Relationships: [
@@ -672,7 +819,14 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
-      [_ in never]: never;
+      posting_integrity_ready: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
+      publish_due_posts: {
+        Args: Record<PropertyKey, never>;
+        Returns: number;
+      };
     };
     Enums: {
       [_ in never]: never;

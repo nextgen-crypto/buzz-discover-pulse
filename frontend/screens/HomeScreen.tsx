@@ -26,12 +26,12 @@ export function HomeScreen() {
   const { data: base } = useSuspenseQuery(homeQueryOptions);
   const loadPage = useServerFn(fetchFeedPage);
 
-  const { user } = useSession();
+  const { user, loading: sessionLoading } = useSession();
   const userId = user?.id ?? null;
   const { data: myProfile } = useMyProfile(userId);
   const { data: savedPosts = [] } = useSavedPosts(userId);
-  const { data: following = [] } = useFollowList(myProfile?.id ?? null, "following");
-  const prefs = useFeedPrefs();
+  const { data: following = [] } = useFollowList(myProfile?.id ?? null, "following", userId);
+  const prefs = useFeedPrefs(userId);
   const { track } = useEventTracker(userId);
 
   // Viewer taste: follows + saves + mutes + hides + watch history.
@@ -69,41 +69,57 @@ export function HomeScreen() {
     setMounted(true);
   }, []);
 
-  // Personalized first page replaces the generic SSR page once ready.
+  // Personalized first page replaces the generic SSR page once ready. Story
+  // state is separate because the viewer-specific query also refreshes it.
+  const [storyRail, setStoryRail] = useState(base.stories);
+  const [storyViewerId, setStoryViewerId] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[] | null>(null);
+  const [feedViewerId, setFeedViewerId] = useState<string | null>(null);
   const [extra, setExtra] = useState<FeedItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(base.feed.nextCursor);
   const [hasMore, setHasMore] = useState(base.feed.hasMore);
   const [loading, setLoading] = useState(false);
   const sentinel = useRef<HTMLDivElement | null>(null);
+  const feedRequestVersion = useRef(0);
 
   const { data: personal } = useQuery({
-    ...personalFeedQueryOptions(profile),
-    enabled: mounted,
+    ...personalFeedQueryOptions(profile, userId),
+    enabled: mounted && !sessionLoading,
   });
 
   useEffect(() => {
+    feedRequestVersion.current += 1;
+    setLoading(false);
+  }, [userId]);
+
+  useEffect(() => {
     if (!personal) return;
+    feedRequestVersion.current += 1;
+    setStoryRail(personal.stories);
+    setStoryViewerId(userId);
     setFeed(personal.feed.items);
+    setFeedViewerId(userId);
     setCursor(personal.feed.nextCursor);
     setHasMore(personal.feed.hasMore);
     setExtra([]);
-  }, [personal]);
+  }, [personal, userId]);
 
   const loadMore = useCallback(async () => {
-    if (loading || !hasMore || !cursor) return;
+    if (feedViewerId !== userId || loading || !hasMore || !cursor) return;
+    const requestVersion = ++feedRequestVersion.current;
     setLoading(true);
     try {
       const page = await loadPage({ data: { cursor, profile } });
+      if (requestVersion !== feedRequestVersion.current || feedViewerId !== userId) return;
       setExtra((prev) => [...prev, ...page.items]);
       setCursor(page.nextCursor);
       setHasMore(page.hasMore);
     } catch {
-      setHasMore(false);
+      if (requestVersion === feedRequestVersion.current) setHasMore(false);
     } finally {
-      setLoading(false);
+      if (requestVersion === feedRequestVersion.current) setLoading(false);
     }
-  }, [cursor, hasMore, loading, loadPage, profile]);
+  }, [cursor, feedViewerId, hasMore, loading, loadPage, profile, userId]);
 
   useEffect(() => {
     const node = sentinel.current;
@@ -128,7 +144,9 @@ export function HomeScreen() {
     setExtra((prev) => prev.filter((i) => i.author.id !== authorId));
   }
 
-  const items = [...(feed ?? base.feed.items), ...extra];
+  const personalFeedReady = feedViewerId === userId;
+  const items = personalFeedReady ? [...(feed ?? base.feed.items), ...extra] : base.feed.items;
+  const visibleStoryRail = storyViewerId === userId ? storyRail : base.stories;
   const ads = useAds();
   const slides = useShowcase();
   const { data: promotions = [] } = usePromotions(userId);
@@ -140,7 +158,12 @@ export function HomeScreen() {
       <TopBar />
       <main className="min-w-0 flex-1 pb-24 sm:pb-28">
         <h1 className="sr-only">WIZZ home feed</h1>
-        <StoryRail currentUser={base.currentUser} stories={base.stories} />
+        <StoryRail
+          currentUser={base.currentUser}
+          currentUserAvatar={myProfile?.avatar_url}
+          currentUserUsername={myProfile?.username}
+          stories={visibleStoryRail}
+        />
         {slides.length > 0 && <ShowcaseCarousel slides={slides} />}
         {items.length === 0 && (
           <div className="px-6 py-12 text-center">
@@ -182,9 +205,7 @@ export function HomeScreen() {
                     <SponsoredPostCard
                       promo={promo}
                       viewerId={userId}
-                      onHide={(campaignId) =>
-                        setHiddenPromos((prev) => [...prev, campaignId])
-                      }
+                      onHide={(campaignId) => setHiddenPromos((prev) => [...prev, campaignId])}
                       onMuteAuthor={(authorId, username) => {
                         prefs.muteAuthor(authorId, username);
                         track("creator_mute", promo.post.id, { authorId });
@@ -199,9 +220,7 @@ export function HomeScreen() {
                 })()
               : ads.length > 0 &&
                 livePromos.length === 0 &&
-                i % 4 === 3 && (
-                  <SponsoredCard ad={ads[Math.floor(i / 4) % ads.length]!} />
-                )}
+                i % 4 === 3 && <SponsoredCard ad={ads[Math.floor(i / 4) % ads.length]!} />}
           </div>
         ))}
         <div ref={sentinel} className="grid h-16 place-items-center">

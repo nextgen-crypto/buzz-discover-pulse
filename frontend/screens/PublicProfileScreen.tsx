@@ -9,6 +9,7 @@ import {
   Link2,
   MessageCircle,
   MoreHorizontal,
+  Play,
   Share2,
   UserX,
   VolumeX,
@@ -40,10 +41,10 @@ export function PublicProfileScreen({ username }: { username: string }) {
   const requireAuth = useAuthGate();
   const navigate = useNavigate();
   const viewerId = user?.id ?? null;
-  const { data: profile, isLoading } = useProfileByUsername(username);
+  const { data: profile, isLoading } = useProfileByUsername(username, viewerId);
   const profileId = profile?.id ?? null;
-  const { data: posts = [] } = useProfilePosts(profileId);
-  const { data: stats } = useProfileStats(profileId);
+  const { data: posts = [] } = useProfilePosts(profileId, viewerId);
+  const { data: stats } = useProfileStats(profileId, viewerId);
   const { isFollowing, canFollow, toggle } = useFollowState(viewerId, profileId);
   const { requested, send, withdraw } = useOutgoingRequest(viewerId, profileId);
   const { blockedByMe, blocksMe, setBlock } = useBlockState(viewerId, profileId);
@@ -396,9 +397,25 @@ export function PublicProfileScreen({ username }: { username: string }) {
           <div className="mt-4 grid grid-cols-3 gap-0.5 sm:grid-cols-4">
             {posts.map((p) => (
               <div key={p.id} className="relative">
-                {p.image_url ? (
+                {p.video_url ? (
+                  <div className="relative">
+                    <video
+                      src={p.video_url}
+                      poster={p.thumbnail_url || p.image_url || undefined}
+                      muted
+                      playsInline
+                      preload="metadata"
+                      className="aspect-square w-full bg-surface-strong object-cover"
+                    />
+                    <span className="absolute inset-0 grid place-items-center">
+                      <span className="grid size-9 place-items-center rounded-full bg-black/55 text-white">
+                        <Play className="size-4 fill-white" />
+                      </span>
+                    </span>
+                  </div>
+                ) : p.thumbnail_url || p.image_url ? (
                   <img
-                    src={p.image_url}
+                    src={p.thumbnail_url || p.image_url!}
                     alt={p.caption || "Post"}
                     loading="lazy"
                     className="aspect-square w-full bg-surface-strong object-cover"
