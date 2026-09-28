@@ -1,5 +1,6 @@
 -- WIZZ posting integrity: real settings, scheduled publishing, and 24-hour stories.
 -- Re-runnable. Apply after the existing part1-part10 migrations.
+-- Fix: pg_policies exposes the command column as "cmd", not "command".
 
 -- ---------------------------------------------------------------- storage
 -- Buckets used to exist only when a project happened to be created manually.
@@ -368,7 +369,7 @@ AS $$
     WHERE schemaname = 'storage'
       AND tablename = 'objects'
       AND policyname = 'Users can view their own post images'
-      AND command = 'SELECT'
+      AND cmd = 'SELECT'
   ) AND EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public'
@@ -431,7 +432,7 @@ BEGIN
     FROM pg_policies
     WHERE schemaname = 'public'
       AND tablename = 'posts'
-      AND command IN ('SELECT', 'ALL')
+      AND cmd IN ('SELECT', 'ALL')
       AND policyname <> 'Posts respect visibility and status'
   ) THEN
     RAISE EXCEPTION 'Unexpected SELECT policy on public.posts; review it before retrying migration';
@@ -442,7 +443,7 @@ BEGIN
     FROM pg_policies
     WHERE schemaname = 'storage'
       AND tablename = 'objects'
-      AND command IN ('SELECT', 'ALL')
+      AND cmd IN ('SELECT', 'ALL')
       AND policyname NOT IN (
         'Users can view their own post images',
         'Avatar images are readable by authenticated users'

@@ -13,5 +13,5 @@ ALTER TABLE public.posts
   ADD COLUMN IF NOT EXISTS allow_remix BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS allow_duet BOOLEAN NOT NULL DEFAULT false;
 
-CREATE INDEX IF NOT EXISTS posts_author_pinned_idx
+CREATE INDEX IF NOT EXIS TS posts_author_pinned_idx
   ON public.posts (author_id, created_at DESC) WHERE is_pinned = true;

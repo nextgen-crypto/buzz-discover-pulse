@@ -354,15 +354,34 @@ export function CreationEngine({
       setError(sizeError("image"));
       return;
     }
-    setError(null);
-    if (photoUrl) URL.revokeObjectURL(photoUrl);
-    setPhoto(file);
-    setPhotoUrl(URL.createObjectURL(file));
+    if (!file.type.startsWith("image/")) {
+      setError("That file is not an image.");
+      return;
+    }
+    // Verify the browser can actually decode this image (catches HEIC, etc.)
+    const testImg = new Image();
+    const testUrl = URL.createObjectURL(file);
+    testImg.onload = () => {
+      URL.revokeObjectURL(testUrl);
+      setError(null);
+      if (photoUrl) URL.revokeObjectURL(photoUrl);
+      setPhoto(file);
+      setPhotoUrl(URL.createObjectURL(file));
+    };
+    testImg.onerror = () => {
+      URL.revokeObjectURL(testUrl);
+      setError("This image format isn't supported by your browser. Try a JPEG or PNG.");
+    };
+    testImg.src = testUrl;
   }
 
   function attachVideo(file: File) {
     if (file.size > VIDEO_MAX_BYTES) {
       setError(sizeError("video"));
+      return;
+    }
+    if (!file.type.startsWith("video/")) {
+      setError("That file is not a video.");
       return;
     }
     setError(null);
